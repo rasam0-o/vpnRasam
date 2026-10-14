@@ -16,7 +16,21 @@ jobs:
         with:
           channel: stable
       - run: flutter create --platforms=android --project-name rasam --org com.rasam .
-      - run: sed -i 's/android:label="[^"]*"/android:label="Rasam"/' android/app/src/main/AndroidManifest.xml
+      - name: Add native DNS code
+        run: |
+          D=$(dirname "$(find android/app/src/main/kotlin -name MainActivity.kt)")
+          rm "$D/MainActivity.kt"
+          cp native/Native.kt "$D/Native.kt"
+          python3 - <<'PY'
+          import re
+          p='android/app/src/main/AndroidManifest.xml'
+          s=open(p).read()
+          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <application',1)
+          svc='<service android:name=".DnsVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    </application>'
+          s=s.replace('</application>',svc,1)
+          s=re.sub(r'android:label="[^"]*"','android:label="Rasam"',s)
+          open(p,'w').write(s)
+          PY
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
