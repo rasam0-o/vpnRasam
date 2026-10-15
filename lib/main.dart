@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_v2ray_client/flutter_v2ray.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const gold = Color(0xFFD4AF37);
@@ -96,6 +98,13 @@ String fmtSpeed(int b) {
   return '$b B/s';
 }
 
+String fmtBytes(int b) {
+  if (b >= 1073741824) return '${(b / 1073741824).toStringAsFixed(1)} GB';
+  if (b >= 1048576) return '${(b / 1048576).toStringAsFixed(1)} MB';
+  if (b >= 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+  return '$b B';
+}
+
 void showMsg(BuildContext c, String t) => ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t)));
 
 // ---------------- Servers and subscriptions ----------------
@@ -110,7 +119,14 @@ class Server {
 
 class Sub {
   String name, url;
+  int? used, total, expire;
   Sub(this.name, this.url);
+}
+
+class SubData {
+  final List<String> links;
+  final int? used, total, expire;
+  SubData(this.links, this.used, this.total, this.expire);
 }
 
 Server? parseLink(String raw, String group) {
@@ -142,6 +158,19 @@ Server? parseLink(String raw, String group) {
   return null;
 }
 
+String renameLink(String link, String name) {
+  if (link.startsWith('vmess://')) {
+    var b = link.substring(8).replaceAll('-', '+').replaceAll('_', '/');
+    b = b.padRight(b.length + (4 - b.length % 4) % 4, '=');
+    final j = jsonDecode(utf8.decode(base64.decode(b))) as Map<String, dynamic>;
+    j['ps'] = name;
+    return 'vmess://${base64.encode(utf8.encode(jsonEncode(j)))}';
+  }
+  final i = link.indexOf('#');
+  final base = i < 0 ? link : link.substring(0, i);
+  return '$base#${Uri.encodeComponent(name)}';
+}
+
 List<String> decodeSub(String body) {
   var t = body.trim();
   if (!t.contains('://')) {
@@ -154,18 +183,69 @@ List<String> decodeSub(String body) {
   return t.split(RegExp(r'\s+')).where((l) => l.contains('://')).toList();
 }
 
-Future<List<String>> fetchSub(String url) async {
+Future<SubData> fetchSub(String url) async {
   final c = HttpClient()..connectionTimeout = const Duration(seconds: 15);
   try {
     final req = await c.getUrl(Uri.parse(url));
     req.headers.set('User-Agent', 'v2rayNG/1.8.0');
     final res = await req.close().timeout(const Duration(seconds: 20));
     if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+    final infoList = res.headers['subscription-userinfo'];
+    int? up, down, total, expire;
+    if (infoList != null && infoList.isNotEmpty) {
+      for (final part in infoList.first.split(';')) {
+        final kv = part.trim().split('=');
+        if (kv.length != 2) continue;
+        final v = int.tryParse(kv[1].trim());
+        switch (kv[0].trim()) {
+          case 'upload':
+            up = v;
+            break;
+          case 'download':
+            down = v;
+            break;
+          case 'total':
+            total = v;
+            break;
+          case 'expire':
+            expire = v;
+            break;
+        }
+      }
+    }
     final body = await res.transform(utf8.decoder).join();
-    return decodeSub(body);
+    final used = (up != null || down != null) ? (up ?? 0) + (down ?? 0) : null;
+    return SubData(decodeSub(body), used, total, expire);
   } finally {
     c.close();
   }
+}
+
+class ScanPage extends StatefulWidget {
+  const ScanPage({super.key});
+  @override
+  State<ScanPage> createState() => _ScanPageState();
+}
+
+class _ScanPageState extends State<ScanPage> {
+  bool done = false;
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Scan QR code')),
+        body: MobileScanner(
+          onDetect: (capture) {
+            if (done) return;
+            for (final b in capture.barcodes) {
+              final v = b.rawValue;
+              if (v != null && v.isNotEmpty) {
+                done = true;
+                Navigator.pop(context, v);
+                return;
+              }
+            }
+          },
+        ),
+      );
 }
 
 class VpnPage extends StatefulWidget {
@@ -182,6 +262,9 @@ class _VpnPageState extends State<VpnPage> {
   String duration = '00:00:00';
   int upSpeed = 0;
   int downSpeed = 0;
+  bool updating = false;
+  final Set<String> collapsed = {};
+  final Set<String> busySubs = {};
   Timer? connTimer;
   late final V2ray v2ray;
 
@@ -189,9 +272,6 @@ class _VpnPageState extends State<VpnPage> {
     if (!mounted) return;
     final state = st.state.toString().toUpperCase();
     setState(() {
-      duration = st.duration.toString();
-      upSpeed = st.uploadSpeed as int;
-      downSpeed = st.downloadSpeed as int;
       if (state == 'CONNECTED') {
         status = 'Connected';
         activeMode.value = 'vpn';
@@ -202,7 +282,14 @@ class _VpnPageState extends State<VpnPage> {
         status = 'Disconnected';
         if (activeMode.value == 'vpn') activeMode.value = 'none';
         connTimer?.cancel();
+        duration = '00:00:00';
+        upSpeed = 0;
+        downSpeed = 0;
+        return;
       }
+      duration = st.duration.toString();
+      upSpeed = st.uploadSpeed as int;
+      downSpeed = st.downloadSpeed as int;
     });
   }
 
@@ -225,27 +312,60 @@ class _VpnPageState extends State<VpnPage> {
     }
     final sraw = prefs.getString('subs');
     if (sraw != null) {
-      subs = (jsonDecode(sraw) as List).map((e) => Sub(e['n'], e['u'])).toList();
+      subs = (jsonDecode(sraw) as List).map((e) {
+        final s = Sub(e['n'], e['u']);
+        s.used = e['us'] as int?;
+        s.total = e['t'] as int?;
+        s.expire = e['e'] as int?;
+        return s;
+      }).toList();
     }
     selLink = prefs.getString('sel') ?? (servers.isNotEmpty ? servers.first.link : null);
+    WidgetsBinding.instance.addPostFrameCallback((_) => autoUpdate());
+  }
+
+  @override
+  void dispose() {
+    connTimer?.cancel();
+    super.dispose();
   }
 
   void save() {
     prefs.setString('servers2', jsonEncode(servers.map((s) => {'l': s.link, 'g': s.group}).toList()));
-    prefs.setString('subs', jsonEncode(subs.map((s) => {'n': s.name, 'u': s.url}).toList()));
+    prefs.setString('subs', jsonEncode(subs.map((s) => {'n': s.name, 'u': s.url, 'us': s.used, 't': s.total, 'e': s.expire}).toList()));
     if (selLink != null) prefs.setString('sel', selLink!);
   }
 
+  Future<void> autoUpdate() async {
+    if (subs.isEmpty) return;
+    setState(() => updating = true);
+    var fail = 0;
+    for (final s in List<Sub>.from(subs)) {
+      try {
+        await updateSub(s);
+      } catch (_) {
+        fail++;
+      }
+      if (mounted) setState(() {});
+    }
+    if (!mounted) return;
+    setState(() => updating = false);
+    if (fail > 0) showMsg(context, 'Couldn\'t update $fail subscription(s)');
+  }
+
   Future<int> updateSub(Sub s) async {
-    final links = await fetchSub(s.url);
+    final data = await fetchSub(s.url);
     final fresh = <Server>[];
-    for (final l in links) {
+    for (final l in data.links) {
       final p = parseLink(l, s.name);
       if (p != null) fresh.add(p);
     }
     if (fresh.isEmpty) throw Exception('No servers found in this subscription');
     servers.removeWhere((e) => e.group == s.name);
     servers.addAll(fresh);
+    s.used = data.used;
+    s.total = data.total;
+    s.expire = data.expire;
     if (selLink == null || !servers.any((e) => e.link == selLink)) selLink = servers.first.link;
     save();
     return fresh.length;
@@ -279,9 +399,9 @@ class _VpnPageState extends State<VpnPage> {
     save();
   }
 
-  Future<void> importClipboard() async {
-    final d = await Clipboard.getData('text/plain');
-    final text = (d?.text ?? '').trim();
+  Future<void> importText(String raw) async {
+    final text = raw.trim();
+    if (text.isEmpty) return showMsg(context, 'Nothing to import');
     if (text.startsWith('http://') || text.startsWith('https://')) {
       try {
         final n = await addSub(text.split(RegExp(r'\s+')).first);
@@ -303,11 +423,21 @@ class _VpnPageState extends State<VpnPage> {
     if (selLink == null && servers.isNotEmpty) selLink = servers.first.link;
     save();
     setState(() {});
-    if (mounted) showMsg(context, n > 0 ? '$n server(s) added' : 'No valid link found in the clipboard');
+    if (mounted) showMsg(context, n > 0 ? '$n server(s) added' : 'No valid link found');
   }
 
-  Future<void> pingAll() async {
-    for (final s in servers) {
+  Future<void> importClipboard() async {
+    final d = await Clipboard.getData('text/plain');
+    await importText(d?.text ?? '');
+  }
+
+  Future<void> scanQr() async {
+    final v = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const ScanPage()));
+    if (v != null && mounted) await importText(v);
+  }
+
+  Future<void> pingList(List<Server> list) async {
+    await Future.wait(list.map((s) async {
       final sw = Stopwatch()..start();
       try {
         final sock = await Socket.connect(s.host, s.port, timeout: const Duration(seconds: 4));
@@ -317,7 +447,111 @@ class _VpnPageState extends State<VpnPage> {
         s.ping = -1;
       }
       if (mounted) setState(() {});
+    }));
+  }
+
+  Future<bool> confirm(String text) async {
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF111111),
+        content: Text(text),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
+  Future<void> deleteServer(Server s) async {
+    if (!await confirm('Delete "${s.name}"?')) return;
+    servers.remove(s);
+    if (selLink == s.link) selLink = servers.isNotEmpty ? servers.first.link : null;
+    save();
+    setState(() {});
+  }
+
+  Future<void> editServer(Server s) async {
+    final nameC = TextEditingController(text: s.name);
+    final linkC = TextEditingController(text: s.link);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF111111),
+        title: const Text('Edit config'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: nameC, decoration: const InputDecoration(labelText: 'Name')),
+            const SizedBox(height: 12),
+            TextField(controller: linkC, minLines: 2, maxLines: 5, decoration: const InputDecoration(labelText: 'Link')),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    var link = linkC.text.trim();
+    final newName = nameC.text.trim();
+    if (link == s.link && newName.isNotEmpty && newName != s.name) {
+      try {
+        link = renameLink(link, newName);
+      } catch (_) {
+        if (mounted) showMsg(context, 'Could not rename this config');
+        return;
+      }
     }
+    final ns = parseLink(link, s.group);
+    if (ns == null) {
+      if (mounted) showMsg(context, 'Invalid link');
+      return;
+    }
+    final i = servers.indexOf(s);
+    if (i < 0) return;
+    servers[i] = ns;
+    if (selLink == s.link) selLink = ns.link;
+    save();
+    setState(() {});
+  }
+
+  void shareServer(Server s) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF111111),
+      builder: (c) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: gold, fontSize: 16)),
+            const SizedBox(height: 12),
+            Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(12),
+              child: QrImageView(data: s.link, size: 240, backgroundColor: Colors.white),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: Colors.black),
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy link'),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: s.link));
+                  Navigator.pop(c);
+                  showMsg(context, 'Link copied');
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   void subsSheet() {
@@ -346,7 +580,7 @@ class _VpnPageState extends State<VpnPage> {
         return Padding(
           padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(c).viewInsets.bottom + 16),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Subscriptions', style: TextStyle(color: gold, fontSize: 18)),
+            const Text('Add subscription', style: TextStyle(color: gold, fontSize: 18)),
             const SizedBox(height: 8),
             TextField(
               controller: ctl,
@@ -386,35 +620,6 @@ class _VpnPageState extends State<VpnPage> {
             ]),
             if (busy) const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator(color: gold)),
             if (info.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(info, style: const TextStyle(color: Colors.white70))),
-            const SizedBox(height: 8),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
-                children: subs
-                    .map((s) => ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(s.name),
-                          subtitle: Text('${servers.where((e) => e.group == s.name).length} servers', style: const TextStyle(fontSize: 12)),
-                          trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                            IconButton(
-                              icon: const Icon(Icons.refresh, color: gold),
-                              onPressed: busy ? null : () => run(() async => 'Updated: ${await updateSub(s)} servers'),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline),
-                              onPressed: busy
-                                  ? null
-                                  : () {
-                                      removeSub(s);
-                                      ss(() {});
-                                      setState(() {});
-                                    },
-                            ),
-                          ]),
-                        ))
-                    .toList(),
-              ),
-            ),
           ]),
         );
       }),
@@ -464,6 +669,7 @@ class _VpnPageState extends State<VpnPage> {
         blockedApps: null,
         bypassSubnets: null,
         proxyOnly: false,
+        notificationDisconnectButtonName: 'Stop',
       );
     } catch (e) {
       connTimer?.cancel();
@@ -474,86 +680,251 @@ class _VpnPageState extends State<VpnPage> {
     }
   }
 
+  // ---------- UI pieces ----------
+
+  Widget statBox(IconData i, String label, String v) => Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(color: const Color(0xFF111111), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
+          child: Column(children: [
+            Icon(i, color: gold, size: 18),
+            const SizedBox(height: 4),
+            Text(v, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+            Text(label, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+          ]),
+        ),
+      );
+
+  Widget actBtn(IconData i, VoidCallback f) => InkWell(
+        onTap: f,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(padding: const EdgeInsets.all(8), child: Icon(i, size: 20, color: Colors.white70)),
+      );
+
+  Widget serverTile(Server s) {
+    final selected = selLink == s.link;
+    final Color pc = s.ping == null
+        ? Colors.white38
+        : s.ping == -1
+            ? Colors.redAccent
+            : s.ping! < 250
+                ? Colors.greenAccent
+                : s.ping! < 500
+                    ? Colors.orangeAccent
+                    : Colors.redAccent;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      decoration: BoxDecoration(
+        color: selected ? gold.withAlpha(30) : const Color(0xFF0D0D0D),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: selected ? gold : Colors.white10),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () {
+          setState(() => selLink = s.link);
+          save();
+        },
+        child: SizedBox(
+          height: 64,
+          child: Row(children: [
+            Container(
+              width: 36,
+              decoration: BoxDecoration(color: selected ? gold : Colors.white12, borderRadius: const BorderRadius.horizontal(left: Radius.circular(13))),
+              child: Center(
+                child: RotatedBox(
+                  quarterTurns: 3,
+                  child: Text(s.proto, style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: selected ? Colors.black : Colors.white70)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 6),
+                Row(children: [
+                  Expanded(child: Text(s.group == 'Manual' ? 'manual' : s.group, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white54))),
+                  if (s.ping != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(color: pc.withAlpha(40), borderRadius: BorderRadius.circular(8)),
+                      child: Text(s.ping == -1 ? '✕' : '${s.ping} ms', style: TextStyle(fontSize: 11, color: pc)),
+                    ),
+                ]),
+              ]),
+            ),
+            actBtn(Icons.edit_outlined, () => editServer(s)),
+            actBtn(Icons.share_outlined, () => shareServer(s)),
+            actBtn(Icons.delete_outline, () => deleteServer(s)),
+            const SizedBox(width: 4),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget section({required String id, required String title, required Widget info, required List<Server> list, required Widget trailing}) {
+    final isOpen = !collapsed.contains(id);
+    return Column(children: [
+      Card(
+        color: const Color(0xFF111111),
+        margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: Colors.white12)),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => setState(() {
+            if (isOpen) {
+              collapsed.add(id);
+            } else {
+              collapsed.remove(id);
+            }
+          }),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 4, 12),
+            child: Row(children: [
+              Icon(isOpen ? Icons.expand_more : Icons.chevron_right, color: gold),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('$title (${list.length})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  info,
+                ]),
+              ),
+              trailing,
+            ]),
+          ),
+        ),
+      ),
+      if (isOpen) ...list.map(serverTile),
+    ]);
+  }
+
+  Widget subInfo(Sub s) {
+    if (s.used == null && s.total == null && s.expire == null) {
+      return const Text('No information', style: TextStyle(fontSize: 12, color: Colors.white54));
+    }
+    final total = s.total ?? 0;
+    final used = s.used ?? 0;
+    int? days;
+    if (s.expire != null && s.expire! > 0) {
+      days = ((s.expire! * 1000 - DateTime.now().millisecondsSinceEpoch) / 86400000).ceil();
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (total > 0)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: LinearProgressIndicator(value: (used / total).clamp(0.0, 1.0).toDouble(), color: gold, backgroundColor: Colors.white12, minHeight: 4),
+        ),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('${fmtBytes(used)} / ${total > 0 ? fmtBytes(total) : '∞'}', style: const TextStyle(fontSize: 12, color: Colors.white54)),
+        if (days != null) Text(days <= 0 ? 'Expired' : '$days days left', style: const TextStyle(fontSize: 12, color: Colors.white54)),
+      ]),
+    ]);
+  }
+
+  Widget subTrailing(Sub s, List<Server> list) => Row(mainAxisSize: MainAxisSize.min, children: [
+        busySubs.contains(s.name)
+            ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: gold)))
+            : IconButton(
+                icon: const Icon(Icons.refresh, color: gold),
+                onPressed: () async {
+                  setState(() => busySubs.add(s.name));
+                  try {
+                    final n = await updateSub(s);
+                    if (mounted) showMsg(context, 'Updated: $n servers');
+                  } catch (e) {
+                    if (mounted) showMsg(context, 'Failed: ${e.toString().replaceFirst('Exception: ', '')}');
+                  }
+                  if (mounted) setState(() => busySubs.remove(s.name));
+                },
+              ),
+        IconButton(icon: const Icon(Icons.speed, color: gold), onPressed: () => pingList(list)),
+        PopupMenuButton<String>(
+          onSelected: (v) async {
+            if (v == 'delete' && await confirm('Delete subscription "${s.name}" and its servers?')) {
+              removeSub(s);
+              setState(() {});
+            }
+          },
+          itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Delete subscription'))],
+        ),
+      ]);
+
   @override
   Widget build(BuildContext context) {
     final on = status == 'Connected';
-    final groups = <String, List<Server>>{};
-    for (final s in servers) {
-      groups.putIfAbsent(s.group, () => []).add(s);
-    }
-    final items = <Object>[];
-    for (final g in groups.entries) {
-      items.add(g.key);
-      items.addAll(g.value);
-    }
+    final local = servers.where((e) => e.group == 'Manual').toList();
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(tooltip: 'Scan QR code', icon: const Icon(Icons.qr_code_scanner), onPressed: scanQr),
         title: const Text('RASAM', style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold)),
         actions: [
-          IconButton(tooltip: 'Ping all', icon: const Icon(Icons.speed), onPressed: pingAll),
-          IconButton(tooltip: 'Import from clipboard', icon: const Icon(Icons.paste), onPressed: importClipboard),
-          IconButton(tooltip: 'Subscriptions', icon: const Icon(Icons.cloud_download_outlined), onPressed: subsSheet),
+          IconButton(tooltip: 'Paste from clipboard', icon: const Icon(Icons.paste), onPressed: importClipboard),
+          IconButton(tooltip: 'Add subscription', icon: const Icon(Icons.cloud_download_outlined), onPressed: subsSheet),
+          IconButton(tooltip: 'Ping all', icon: const Icon(Icons.speed), onPressed: () => pingList(servers)),
         ],
+        bottom: updating ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator(color: gold, minHeight: 2)) : null,
       ),
       body: Column(children: [
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         GestureDetector(
           onTap: toggle,
           child: Container(
-            width: 130,
-            height: 130,
+            width: 112,
+            height: 112,
             decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: gold, width: 3), color: on ? gold : Colors.transparent),
-            child: Icon(Icons.power_settings_new, size: 56, color: on ? Colors.black : gold),
+            child: Icon(Icons.power_settings_new, size: 50, color: on ? Colors.black : gold),
           ),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Text(status, style: const TextStyle(color: gold, fontSize: 18)),
-        if (on) Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text('$duration   ↓ ${fmtSpeed(downSpeed)}   ↑ ${fmtSpeed(upSpeed)}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Row(children: [
+            statBox(Icons.timer_outlined, 'Time', duration),
+            statBox(Icons.arrow_downward, 'Download', fmtSpeed(downSpeed)),
+            statBox(Icons.arrow_upward, 'Upload', fmtSpeed(upSpeed)),
+          ]),
         ),
-        const Divider(color: Colors.white12, height: 32),
+        const SizedBox(height: 8),
         Expanded(
-          child: items.isEmpty
-              ? const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('No servers yet.\nCopy a config link (vless://, vmess://...) or a subscription link, then tap the paste button.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54)),
-                  ),
-                )
-              : ListView.builder(
-                  itemCount: items.length,
-                  itemBuilder: (c, i) {
-                    final it = items[i];
-                    if (it is String) {
-                      return Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                        child: Text('$it  (${groups[it]!.length})', style: const TextStyle(color: gold, fontSize: 13)),
-                      );
+          child: ListView(padding: const EdgeInsets.only(bottom: 16), children: [
+            section(
+              id: 'Manual',
+              title: 'Local',
+              info: const Text('No subscription', style: TextStyle(fontSize: 12, color: Colors.white54)),
+              list: local,
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(icon: const Icon(Icons.speed, color: gold), onPressed: () => pingList(local)),
+                PopupMenuButton<String>(
+                  onSelected: (v) async {
+                    if (v == 'clear' && await confirm('Delete all local configs?')) {
+                      servers.removeWhere((e) => e.group == 'Manual');
+                      if (selLink != null && !servers.any((e) => e.link == selLink)) {
+                        selLink = servers.isNotEmpty ? servers.first.link : null;
+                      }
+                      save();
+                      setState(() {});
                     }
-                    final s = it as Server;
-                    return Dismissible(
-                      key: ValueKey('${s.group}|${s.link}'),
-                      onDismissed: (_) {
-                        servers.remove(s);
-                        if (selLink == s.link) selLink = servers.isNotEmpty ? servers.first.link : null;
-                        save();
-                        setState(() {});
-                      },
-                      background: Container(color: Colors.red.shade900),
-                      child: ListTile(
-                        leading: Icon(selLink == s.link ? Icons.radio_button_checked : Icons.radio_button_off, color: gold),
-                        title: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text('${s.proto} · ${s.host}:${s.port}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11)),
-                        trailing: Text(s.ping == null ? '' : s.ping == -1 ? '✕' : '${s.ping}ms', style: TextStyle(color: s.ping == -1 ? Colors.red : gold)),
-                        onTap: () {
-                          setState(() => selLink = s.link);
-                          save();
-                        },
-                      ),
-                    );
                   },
+                  itemBuilder: (_) => const [PopupMenuItem(value: 'clear', child: Text('Delete all'))],
                 ),
+              ]),
+            ),
+            ...subs.map((s) {
+              final list = servers.where((e) => e.group == s.name).toList();
+              return section(id: s.name, title: s.name, info: subInfo(s), list: list, trailing: subTrailing(s, list));
+            }),
+            if (servers.isEmpty && subs.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text('Nothing here yet.\nScan a QR code, or copy a config / subscription link and tap the paste button.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white54)),
+              ),
+          ]),
         ),
       ]),
     );
