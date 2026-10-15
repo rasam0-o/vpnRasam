@@ -33,7 +33,24 @@ jobs:
           PY
       - run: flutter pub get
       - run: flutter build apk --release
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p out
+          cp build/app/outputs/flutter-apk/app-release.apk out/unsigned.apk
+          if [ -z "$KS_B64" ]; then
+            echo "No keystore secret found, keeping the default signature"
+            mv out/unsigned.apk out/rasam.apk
+            exit 0
+          fi
+          echo "$KS_B64" | base64 -d > rasam.jks
+          APKSIGNER=$(ls $ANDROID_HOME/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" sign --ks rasam.jks --ks-key-alias rasam --ks-pass env:KS_PASS --key-pass env:KS_PASS --out out/rasam.apk out/unsigned.apk
+          "$APKSIGNER" verify --print-certs out/rasam.apk
+          rm out/unsigned.apk
       - uses: actions/upload-artifact@v4
         with:
           name: rasam-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: out/rasam.apk
