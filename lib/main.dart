@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_v2ray_client/flutter_v2ray.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const gold = Color(0xFFD4AF37);
@@ -89,6 +90,12 @@ class _ShellState extends State<Shell> {
       );
 }
 
+String fmtSpeed(int b) {
+  if (b >= 1048576) return '${(b / 1048576).toStringAsFixed(1)} MB/s';
+  if (b >= 1024) return '${(b / 1024).toStringAsFixed(0)} KB/s';
+  return '$b B/s';
+}
+
 void showMsg(BuildContext c, String t) => ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t)));
 
 // ---------------- Servers and subscriptions ----------------
@@ -172,10 +179,38 @@ class _VpnPageState extends State<VpnPage> {
   List<Sub> subs = [];
   String? selLink;
   String status = 'Disconnected';
+  String duration = '00:00:00';
+  int upSpeed = 0;
+  int downSpeed = 0;
+  Timer? connTimer;
+  late final V2ray v2ray;
+
+  void onStatus(dynamic st) {
+    if (!mounted) return;
+    final state = st.state.toString().toUpperCase();
+    setState(() {
+      duration = st.duration.toString();
+      upSpeed = st.uploadSpeed as int;
+      downSpeed = st.downloadSpeed as int;
+      if (state == 'CONNECTED') {
+        status = 'Connected';
+        activeMode.value = 'vpn';
+        connTimer?.cancel();
+      } else if (state.startsWith('CONNECTING')) {
+        status = 'Connecting…';
+      } else if (state == 'DISCONNECTED') {
+        status = 'Disconnected';
+        if (activeMode.value == 'vpn') activeMode.value = 'none';
+        connTimer?.cancel();
+      }
+    });
+  }
 
   @override
   void initState() {
     super.initState();
+    v2ray = V2ray(onStatusChanged: onStatus);
+    v2ray.initialize(notificationIconResourceType: 'mipmap', notificationIconResourceName: 'ic_launcher').catchError((_) {});
     final raw = prefs.getString('servers2');
     if (raw != null) {
       for (final e in jsonDecode(raw) as List) {
@@ -388,19 +423,55 @@ class _VpnPageState extends State<VpnPage> {
 
   Future<void> toggle() async {
     if (status != 'Disconnected') {
+      connTimer?.cancel();
+      try {
+        await v2ray.stopV2Ray();
+      } catch (_) {}
       setState(() => status = 'Disconnected');
-      activeMode.value = 'none';
+      if (activeMode.value == 'vpn') activeMode.value = 'none';
       return;
     }
     if (activeMode.value == 'dns') {
       return showMsg(context, 'DNS is on. Turn it off in the DNS tab first. VPN and DNS can\'t run together.');
     }
-    if (selLink == null) return showMsg(context, 'Add a server first');
+    final found = servers.where((e) => e.link == selLink).toList();
+    if (found.isEmpty) return showMsg(context, 'Add a server first');
+    final srv = found.first;
+    dynamic parser;
+    try {
+      parser = V2ray.parseFromURL(srv.link);
+    } catch (_) {
+      return showMsg(context, 'This link type isn\'t supported yet (${srv.proto})');
+    }
     setState(() => status = 'Connecting…');
-    await Future.delayed(const Duration(seconds: 1));
-    if (!mounted) return;
-    setState(() => status = 'Disconnected');
-    showMsg(context, 'The connection core isn\'t added yet');
+    try {
+      final ok = await v2ray.requestPermission();
+      if (!ok) {
+        if (mounted) setState(() => status = 'Disconnected');
+        if (mounted) showMsg(context, 'VPN permission was not granted');
+        return;
+      }
+      connTimer?.cancel();
+      connTimer = Timer(const Duration(seconds: 25), () {
+        if (mounted && status == 'Connecting…') {
+          setState(() => status = 'Disconnected');
+          showMsg(context, 'Connection timed out');
+        }
+      });
+      await v2ray.startV2Ray(
+        remark: srv.name,
+        config: parser.getFullConfiguration(),
+        blockedApps: null,
+        bypassSubnets: null,
+        proxyOnly: false,
+      );
+    } catch (e) {
+      connTimer?.cancel();
+      if (mounted) {
+        setState(() => status = 'Disconnected');
+        showMsg(context, 'Error: $e');
+      }
+    }
   }
 
   @override
@@ -437,6 +508,10 @@ class _VpnPageState extends State<VpnPage> {
         ),
         const SizedBox(height: 12),
         Text(status, style: const TextStyle(color: gold, fontSize: 18)),
+        if (on) Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text('$duration   ↓ ${fmtSpeed(downSpeed)}   ↑ ${fmtSpeed(upSpeed)}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+        ),
         const Divider(color: Colors.white12, height: 32),
         Expanded(
           child: items.isEmpty
