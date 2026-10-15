@@ -25,14 +25,16 @@ jobs:
           import re
           p='android/app/src/main/AndroidManifest.xml'
           s=open(p).read()
-          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <application',1)
+          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <application android:extractNativeLibs="true"',1)
           svc='<service android:name=".DnsVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service>\n    </application>'
           s=s.replace('</application>',svc,1)
           s=re.sub(r'android:label="[^"]*"','android:label="Rasam"',s)
           open(p,'w').write(s)
           PY
+      - name: Set minSdk
+        run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' android/app/build.gradle*
       - run: flutter pub get
-      - run: flutter build apk --release
+      - run: flutter build apk --release --no-shrink
       - name: Sign APK
         env:
           KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
