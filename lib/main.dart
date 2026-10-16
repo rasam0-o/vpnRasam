@@ -8,7 +8,10 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const gold = Color(0xFFD4AF37);
+const accent = Color(0xFF10B981);
+const bgColor = Color(0xFF0B0D0E);
+const cardColor = Color(0xFF15181B);
+const cardColor2 = Color(0xFF101315);
 const dnsChannel = MethodChannel('rasam/dns');
 final activeMode = ValueNotifier<String>('none'); // none / vpn / dns
 late SharedPreferences prefs;
@@ -26,9 +29,9 @@ class RasamApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           brightness: Brightness.dark,
-          scaffoldBackgroundColor: Colors.black,
-          colorScheme: const ColorScheme.dark(primary: gold, secondary: gold, surface: Color(0xFF111111)),
-          appBarTheme: const AppBarTheme(backgroundColor: Colors.black, foregroundColor: gold),
+          scaffoldBackgroundColor: bgColor,
+          colorScheme: const ColorScheme.dark(primary: accent, secondary: accent, surface: cardColor),
+          appBarTheme: const AppBarTheme(backgroundColor: bgColor, foregroundColor: accent),
         ),
         home: const Splash(),
       );
@@ -58,9 +61,15 @@ class _SplashState extends State<Splash> {
             builder: (c, v, _) => Opacity(
               opacity: v,
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.bolt, color: gold, size: 40 + 50 * v),
+                Container(
+                  width: 40 + 50 * v,
+                  height: 40 + 50 * v,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(22), border: Border.all(color: accent, width: 2)),
+                  child: Text('R', style: TextStyle(color: accent, fontSize: 24 + 34 * v, fontWeight: FontWeight.bold)),
+                ),
                 const SizedBox(height: 12),
-                const Text('RASAM', style: TextStyle(color: gold, fontSize: 34, letterSpacing: 8, fontWeight: FontWeight.bold)),
+                const Text('RASAM', style: TextStyle(color: accent, fontSize: 34, letterSpacing: 8, fontWeight: FontWeight.bold)),
               ]),
             ),
           ),
@@ -80,13 +89,13 @@ class _ShellState extends State<Shell> {
   Widget build(BuildContext context) => Scaffold(
         body: IndexedStack(index: tab, children: const [VpnPage(), DnsPage()]),
         bottomNavigationBar: NavigationBar(
-          backgroundColor: Colors.black,
-          indicatorColor: gold.withAlpha(60),
+          backgroundColor: bgColor,
+          indicatorColor: accent.withAlpha(60),
           selectedIndex: tab,
           onDestinationSelected: (i) => setState(() => tab = i),
           destinations: const [
-            NavigationDestination(icon: Icon(Icons.vpn_key_outlined), selectedIcon: Icon(Icons.vpn_key, color: gold), label: 'VPN'),
-            NavigationDestination(icon: Icon(Icons.dns_outlined), selectedIcon: Icon(Icons.dns, color: gold), label: 'DNS'),
+            NavigationDestination(icon: Icon(Icons.vpn_key_outlined), selectedIcon: Icon(Icons.vpn_key, color: accent), label: 'VPN'),
+            NavigationDestination(icon: Icon(Icons.dns_outlined), selectedIcon: Icon(Icons.dns, color: accent), label: 'DNS'),
           ],
         ),
       );
@@ -113,6 +122,7 @@ class Server {
   final String name, link, host, group;
   final int port;
   int? ping;
+  int? sortPing;
   Server(this.name, this.link, this.host, this.port, this.group);
   String get proto => link.split('://').first.toUpperCase();
 }
@@ -233,6 +243,12 @@ class _ScanPageState extends State<ScanPage> {
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('Scan QR code')),
         body: MobileScanner(
+          errorBuilder: (context, error, child) => Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('Camera error: ${error.errorCode.name}\n${error.errorDetails?.message ?? ''}\n\nCheck that Rasam has camera permission in Android settings.', textAlign: TextAlign.center),
+            ),
+          ),
           onDetect: (capture) {
             if (done) return;
             for (final b in capture.barcodes) {
@@ -266,11 +282,30 @@ class _VpnPageState extends State<VpnPage> {
   final Set<String> collapsed = {};
   final Set<String> busySubs = {};
   Timer? connTimer;
+  Timer? testTimer;
+  bool wantOn = false;
+  final DateTime launch = DateTime.now();
+  DateTime? lastStopCall;
+  String testInfo = '';
   late final V2ray v2ray;
 
   void onStatus(dynamic st) {
     if (!mounted) return;
     final state = st.state.toString().toUpperCase();
+    if (state == 'CONNECTED' && !wantOn) {
+      if (DateTime.now().difference(launch).inSeconds < 5) {
+        wantOn = true;
+      } else {
+        final now = DateTime.now();
+        if (lastStopCall == null || now.difference(lastStopCall!).inSeconds >= 3) {
+          lastStopCall = now;
+          v2ray.stopV2Ray().catchError((_) {});
+        }
+        return;
+      }
+    }
+    if (!wantOn && state.startsWith('CONNECTING')) return;
+    final wasConnected = status == 'Connected';
     setState(() {
       if (state == 'CONNECTED') {
         status = 'Connected';
@@ -285,12 +320,30 @@ class _VpnPageState extends State<VpnPage> {
         duration = '00:00:00';
         upSpeed = 0;
         downSpeed = 0;
+        testInfo = '';
         return;
       }
       duration = st.duration.toString();
       upSpeed = st.uploadSpeed as int;
       downSpeed = st.downloadSpeed as int;
     });
+    if (state == 'CONNECTED' && !wasConnected) {
+      testTimer?.cancel();
+      testTimer = Timer(const Duration(seconds: 3), testConnection);
+    }
+  }
+
+  Future<void> testConnection() async {
+    if (!mounted || status != 'Connected') return;
+    setState(() => testInfo = 'Testing…');
+    try {
+      final d = await v2ray.getConnectedServerDelay();
+      if (!mounted) return;
+      final ms = (d as num).toInt();
+      setState(() => testInfo = ms > 0 ? 'Internet OK · $ms ms' : 'No internet through this server');
+    } catch (_) {
+      if (mounted) setState(() => testInfo = 'No internet through this server');
+    }
   }
 
   @override
@@ -321,12 +374,16 @@ class _VpnPageState extends State<VpnPage> {
       }).toList();
     }
     selLink = prefs.getString('sel') ?? (servers.isNotEmpty ? servers.first.link : null);
-    WidgetsBinding.instance.addPostFrameCallback((_) => autoUpdate());
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await autoUpdate();
+      await pingList(servers);
+    });
   }
 
   @override
   void dispose() {
     connTimer?.cancel();
+    testTimer?.cancel();
     super.dispose();
   }
 
@@ -448,13 +505,17 @@ class _VpnPageState extends State<VpnPage> {
       }
       if (mounted) setState(() {});
     }));
+    for (final s in list) {
+      s.sortPing = s.ping;
+    }
+    if (mounted) setState(() {});
   }
 
   Future<bool> confirm(String text) async {
     final r = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        backgroundColor: const Color(0xFF111111),
+        backgroundColor: cardColor,
         content: Text(text),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
@@ -479,7 +540,7 @@ class _VpnPageState extends State<VpnPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        backgroundColor: const Color(0xFF111111),
+        backgroundColor: cardColor,
         title: const Text('Edit config'),
         content: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -522,12 +583,12 @@ class _VpnPageState extends State<VpnPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF111111),
+      backgroundColor: cardColor,
       builder: (c) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: gold, fontSize: 16)),
+            Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: accent, fontSize: 16)),
             const SizedBox(height: 12),
             Container(
               color: Colors.white,
@@ -538,7 +599,7 @@ class _VpnPageState extends State<VpnPage> {
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: Colors.black),
+                style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
                 icon: const Icon(Icons.copy),
                 label: const Text('Copy link'),
                 onPressed: () {
@@ -554,81 +615,13 @@ class _VpnPageState extends State<VpnPage> {
     );
   }
 
-  void subsSheet() {
-    final ctl = TextEditingController();
-    var busy = false;
-    var info = '';
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF111111),
-      builder: (c) => StatefulBuilder(builder: (c, ss) {
-        Future<void> run(Future<String> Function() f) async {
-          ss(() {
-            busy = true;
-            info = '';
-          });
-          try {
-            info = await f();
-          } catch (e) {
-            info = 'Failed: ${e.toString().replaceFirst('Exception: ', '')}';
-          }
-          ss(() => busy = false);
-          if (mounted) setState(() {});
-        }
-
-        return Padding(
-          padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(c).viewInsets.bottom + 16),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Add subscription', style: TextStyle(color: gold, fontSize: 18)),
-            const SizedBox(height: 8),
-            TextField(
-              controller: ctl,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(labelText: 'Subscription link (https://...)', prefixIcon: Icon(Icons.link, color: gold)),
-            ),
-            const SizedBox(height: 8),
-            Row(children: [
-              Expanded(
-                child: FilledButton(
-                  style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: Colors.black),
-                  onPressed: busy
-                      ? null
-                      : () => run(() async {
-                            final n = await addSub(ctl.text);
-                            ctl.clear();
-                            return 'Added: $n servers';
-                          }),
-                  child: const Text('Add'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: busy || subs.isEmpty
-                      ? null
-                      : () => run(() async {
-                            var total = 0;
-                            for (final s in List<Sub>.from(subs)) {
-                              total += await updateSub(s);
-                            }
-                            return 'Updated: $total servers';
-                          }),
-                  child: const Text('Update all'),
-                ),
-              ),
-            ]),
-            if (busy) const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator(color: gold)),
-            if (info.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(info, style: const TextStyle(color: Colors.white70))),
-          ]),
-        );
-      }),
-    );
-  }
-
   Future<void> toggle() async {
     if (status != 'Disconnected') {
       connTimer?.cancel();
+      testTimer?.cancel();
+      wantOn = false;
+      lastStopCall = DateTime.now();
+      testInfo = '';
       try {
         await v2ray.stopV2Ray();
       } catch (_) {}
@@ -648,10 +641,12 @@ class _VpnPageState extends State<VpnPage> {
     } catch (_) {
       return showMsg(context, 'This link type isn\'t supported yet (${srv.proto})');
     }
+    wantOn = true;
     setState(() => status = 'Connecting…');
     try {
       final ok = await v2ray.requestPermission();
       if (!ok) {
+        wantOn = false;
         if (mounted) setState(() => status = 'Disconnected');
         if (mounted) showMsg(context, 'VPN permission was not granted');
         return;
@@ -659,6 +654,8 @@ class _VpnPageState extends State<VpnPage> {
       connTimer?.cancel();
       connTimer = Timer(const Duration(seconds: 25), () {
         if (mounted && status == 'Connecting…') {
+          wantOn = false;
+          v2ray.stopV2Ray().catchError((_) {});
           setState(() => status = 'Disconnected');
           showMsg(context, 'Connection timed out');
         }
@@ -673,11 +670,24 @@ class _VpnPageState extends State<VpnPage> {
       );
     } catch (e) {
       connTimer?.cancel();
+      wantOn = false;
       if (mounted) {
         setState(() => status = 'Disconnected');
         showMsg(context, 'Error: $e');
       }
     }
+  }
+
+  int sortKey(Server s) => (s.sortPing == null || s.sortPing! < 0) ? 1 << 30 : s.sortPing!;
+
+  List<Server> sorted(List<Server> l) {
+    final idx = {for (var i = 0; i < l.length; i++) l[i]: i};
+    final c = List<Server>.from(l);
+    c.sort((a, b) {
+      final d = sortKey(a).compareTo(sortKey(b));
+      return d != 0 ? d : idx[a]!.compareTo(idx[b]!);
+    });
+    return c;
   }
 
   // ---------- UI pieces ----------
@@ -686,9 +696,9 @@ class _VpnPageState extends State<VpnPage> {
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 4),
           padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(color: const Color(0xFF111111), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
+          decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
           child: Column(children: [
-            Icon(i, color: gold, size: 18),
+            Icon(i, color: accent, size: 18),
             const SizedBox(height: 4),
             Text(v, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
             Text(label, style: const TextStyle(fontSize: 11, color: Colors.white54)),
@@ -716,9 +726,9 @@ class _VpnPageState extends State<VpnPage> {
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       decoration: BoxDecoration(
-        color: selected ? gold.withAlpha(30) : const Color(0xFF0D0D0D),
+        color: selected ? accent.withAlpha(30) : cardColor2,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: selected ? gold : Colors.white10),
+        border: Border.all(color: selected ? accent : Colors.white10),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
@@ -731,7 +741,7 @@ class _VpnPageState extends State<VpnPage> {
           child: Row(children: [
             Container(
               width: 36,
-              decoration: BoxDecoration(color: selected ? gold : Colors.white12, borderRadius: const BorderRadius.horizontal(left: Radius.circular(13))),
+              decoration: BoxDecoration(color: selected ? accent : Colors.white12, borderRadius: const BorderRadius.horizontal(left: Radius.circular(13))),
               child: Center(
                 child: RotatedBox(
                   quarterTurns: 3,
@@ -769,7 +779,7 @@ class _VpnPageState extends State<VpnPage> {
     final isOpen = !collapsed.contains(id);
     return Column(children: [
       Card(
-        color: const Color(0xFF111111),
+        color: cardColor,
         margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: Colors.white12)),
         child: InkWell(
@@ -784,7 +794,7 @@ class _VpnPageState extends State<VpnPage> {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 12, 4, 12),
             child: Row(children: [
-              Icon(isOpen ? Icons.expand_more : Icons.chevron_right, color: gold),
+              Icon(isOpen ? Icons.expand_more : Icons.chevron_right, color: accent),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -816,7 +826,7 @@ class _VpnPageState extends State<VpnPage> {
       if (total > 0)
         Padding(
           padding: const EdgeInsets.only(bottom: 4),
-          child: LinearProgressIndicator(value: (used / total).clamp(0.0, 1.0).toDouble(), color: gold, backgroundColor: Colors.white12, minHeight: 4),
+          child: LinearProgressIndicator(value: (used / total).clamp(0.0, 1.0).toDouble(), color: accent, backgroundColor: Colors.white12, minHeight: 4),
         ),
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         Text('${fmtBytes(used)} / ${total > 0 ? fmtBytes(total) : '∞'}', style: const TextStyle(fontSize: 12, color: Colors.white54)),
@@ -827,9 +837,9 @@ class _VpnPageState extends State<VpnPage> {
 
   Widget subTrailing(Sub s, List<Server> list) => Row(mainAxisSize: MainAxisSize.min, children: [
         busySubs.contains(s.name)
-            ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: gold)))
+            ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: accent)))
             : IconButton(
-                icon: const Icon(Icons.refresh, color: gold),
+                icon: const Icon(Icons.refresh, color: accent),
                 onPressed: () async {
                   setState(() => busySubs.add(s.name));
                   try {
@@ -841,7 +851,7 @@ class _VpnPageState extends State<VpnPage> {
                   if (mounted) setState(() => busySubs.remove(s.name));
                 },
               ),
-        IconButton(icon: const Icon(Icons.speed, color: gold), onPressed: () => pingList(list)),
+        IconButton(icon: const Icon(Icons.speed, color: accent), onPressed: () => pingList(list)),
         PopupMenuButton<String>(
           onSelected: (v) async {
             if (v == 'delete' && await confirm('Delete subscription "${s.name}" and its servers?')) {
@@ -856,17 +866,16 @@ class _VpnPageState extends State<VpnPage> {
   @override
   Widget build(BuildContext context) {
     final on = status == 'Connected';
-    final local = servers.where((e) => e.group == 'Manual').toList();
+    final local = sorted(servers.where((e) => e.group == 'Manual').toList());
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(tooltip: 'Scan QR code', icon: const Icon(Icons.qr_code_scanner), onPressed: scanQr),
         title: const Text('RASAM', style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold)),
         actions: [
           IconButton(tooltip: 'Paste from clipboard', icon: const Icon(Icons.paste), onPressed: importClipboard),
-          IconButton(tooltip: 'Add subscription', icon: const Icon(Icons.cloud_download_outlined), onPressed: subsSheet),
           IconButton(tooltip: 'Ping all', icon: const Icon(Icons.speed), onPressed: () => pingList(servers)),
         ],
-        bottom: updating ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator(color: gold, minHeight: 2)) : null,
+        bottom: updating ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator(color: accent, minHeight: 2)) : null,
       ),
       body: Column(children: [
         const SizedBox(height: 16),
@@ -875,13 +884,20 @@ class _VpnPageState extends State<VpnPage> {
           child: Container(
             width: 112,
             height: 112,
-            decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: gold, width: 3), color: on ? gold : Colors.transparent),
-            child: Icon(Icons.power_settings_new, size: 50, color: on ? Colors.black : gold),
+            decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: accent, width: 3), color: on ? accent : Colors.transparent),
+            child: Icon(Icons.power_settings_new, size: 50, color: on ? Colors.black : accent),
           ),
         ),
         const SizedBox(height: 10),
-        Text(status, style: const TextStyle(color: gold, fontSize: 18)),
-        const SizedBox(height: 12),
+        Text(status, style: const TextStyle(color: accent, fontSize: 18)),
+        GestureDetector(
+          onTap: testConnection,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(on && testInfo.isNotEmpty ? testInfo : ' ', style: TextStyle(fontSize: 12, color: testInfo.contains('OK') ? accent : Colors.orangeAccent)),
+          ),
+        ),
+        const SizedBox(height: 8),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8),
           child: Row(children: [
@@ -899,7 +915,7 @@ class _VpnPageState extends State<VpnPage> {
               info: const Text('No subscription', style: TextStyle(fontSize: 12, color: Colors.white54)),
               list: local,
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(icon: const Icon(Icons.speed, color: gold), onPressed: () => pingList(local)),
+                IconButton(icon: const Icon(Icons.speed, color: accent), onPressed: () => pingList(local)),
                 PopupMenuButton<String>(
                   onSelected: (v) async {
                     if (v == 'clear' && await confirm('Delete all local configs?')) {
@@ -916,7 +932,7 @@ class _VpnPageState extends State<VpnPage> {
               ]),
             ),
             ...subs.map((s) {
-              final list = servers.where((e) => e.group == s.name).toList();
+              final list = sorted(servers.where((e) => e.group == s.name).toList());
               return section(id: s.name, title: s.name, info: subInfo(s), list: list, trailing: subTrailing(s, list));
             }),
             if (servers.isEmpty && subs.isEmpty)
@@ -1027,7 +1043,7 @@ class _DnsPageState extends State<DnsPage> {
   void serversSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF111111),
+      backgroundColor: cardColor,
       isScrollControlled: true,
       builder: (c) => StatefulBuilder(builder: (c, ss) {
         Widget tile(List<String> e, {bool deletable = false}) => ListTile(
@@ -1053,10 +1069,10 @@ class _DnsPageState extends State<DnsPage> {
             );
         return SafeArea(
           child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(16), children: [
-            const Text('DNS servers', style: TextStyle(color: gold, fontSize: 18)),
+            const Text('DNS servers', style: TextStyle(color: accent, fontSize: 18)),
             const SizedBox(height: 4),
             ...dnsPresets.map((e) => tile(e)),
-            if (custom.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 12), child: Text('Your servers', style: TextStyle(color: gold, fontSize: 13))),
+            if (custom.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 12), child: Text('Your servers', style: TextStyle(color: accent, fontSize: 13))),
             ...custom.map((e) => tile(e, deletable: true)),
             const SizedBox(height: 8),
             OutlinedButton.icon(
@@ -1084,7 +1100,7 @@ class _DnsPageState extends State<DnsPage> {
           controller: c,
           enabled: !on,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(labelText: label, prefixIcon: const Icon(Icons.public, color: gold), border: const UnderlineInputBorder()),
+          decoration: InputDecoration(labelText: label, prefixIcon: const Icon(Icons.public, color: accent), border: const UnderlineInputBorder()),
         ),
       );
 
@@ -1104,7 +1120,7 @@ class _DnsPageState extends State<DnsPage> {
           SizedBox(
             height: 52,
             child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(foregroundColor: gold, side: const BorderSide(color: gold)),
+              style: OutlinedButton.styleFrom(foregroundColor: accent, side: const BorderSide(color: accent)),
               icon: const Icon(Icons.list_alt),
               label: const Text('Default DNS addresses'),
               onPressed: on ? null : serversSheet,
@@ -1114,13 +1130,13 @@ class _DnsPageState extends State<DnsPage> {
           SizedBox(
             height: 54,
             child: FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: Colors.black),
+              style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
               onPressed: toggle,
               child: Text(on ? 'STOP' : 'START', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             ),
           ),
           const SizedBox(height: 24),
-          Center(child: Text(on ? 'Active' : 'Inactive', style: TextStyle(color: on ? gold : Colors.white54, fontSize: 26))),
+          Center(child: Text(on ? 'Active' : 'Inactive', style: TextStyle(color: on ? accent : Colors.white54, fontSize: 26))),
           const SizedBox(height: 16),
           const Text('DNS runs on its own, separate from VPN. Only DNS requests go to the addresses above.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white38, fontSize: 12)),
         ]),
