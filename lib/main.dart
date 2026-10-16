@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_v2ray_client/flutter_v2ray.dart';
@@ -309,13 +310,144 @@ class _ScanPageState extends State<ScanPage> {
       );
 }
 
+BoxDecoration raised({double r = 14, bool selected = false}) => BoxDecoration(
+      borderRadius: BorderRadius.circular(r),
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: selected ? [accent.withAlpha(48), accent.withAlpha(16)] : const [Color(0xFF1D2227), Color(0xFF121518)],
+      ),
+      border: Border.all(color: selected ? accent : Colors.white.withAlpha(24)),
+      boxShadow: [
+        BoxShadow(color: Colors.black.withAlpha(160), blurRadius: 12, offset: const Offset(0, 5)),
+        if (selected) BoxShadow(color: accent.withAlpha(60), blurRadius: 16),
+      ],
+    );
+
+class GlowPainter extends CustomPainter {
+  final double t;
+  final bool on;
+  final bool connecting;
+  GlowPainter({required this.t, required this.on, required this.connecting});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = size.center(Offset.zero);
+    const base = 52.0;
+    final pulse = 0.5 + 0.5 * math.sin(t * 2 * math.pi);
+    final haloR = base + 30 + (on ? 11 * pulse : 4 * pulse);
+    final halo = Paint()
+      ..shader = RadialGradient(colors: [accent.withAlpha(on ? 120 : 40), accent.withAlpha(0)]).createShader(Rect.fromCircle(center: c, radius: haloR));
+    canvas.drawCircle(c, haloR, halo);
+    if (on || connecting) {
+      const n = 3;
+      for (var i = 0; i < n; i++) {
+        final p = (t * (connecting ? 2 : 1) + i / n) % 1.0;
+        final ring = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = accent.withAlpha(((1 - p) * (connecting ? 170 : 110)).toInt());
+        canvas.drawCircle(c, base + 4 + p * 38, ring);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(GlowPainter old) => old.t != t || old.on != on || old.connecting != connecting;
+}
+
+class PowerButton extends StatefulWidget {
+  final Animation<double> anim;
+  final String status;
+  final VoidCallback onTap;
+  const PowerButton({super.key, required this.anim, required this.status, required this.onTap});
+  @override
+  State<PowerButton> createState() => _PowerButtonState();
+}
+
+class _PowerButtonState extends State<PowerButton> {
+  bool down = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final on = widget.status == 'Connected';
+    final connecting = widget.status == 'Connecting…';
+    return GestureDetector(
+      onTapDown: (_) => setState(() => down = true),
+      onTapUp: (_) => setState(() => down = false),
+      onTapCancel: () => setState(() => down = false),
+      onTap: widget.onTap,
+      child: SizedBox(
+        width: 190,
+        height: 190,
+        child: AnimatedBuilder(
+          animation: widget.anim,
+          builder: (context, _) => CustomPaint(
+            painter: GlowPainter(t: widget.anim.value, on: on, connecting: connecting),
+            child: Center(
+              child: AnimatedScale(
+                scale: down ? 0.93 : 1.0,
+                duration: const Duration(milliseconds: 120),
+                child: Container(
+                  width: 104,
+                  height: 104,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      center: const Alignment(-0.35, -0.5),
+                      radius: 1.0,
+                      colors: on ? const [Color(0xFF6EE7B7), accent, Color(0xFF047857)] : const [Color(0xFF2B3238), Color(0xFF181C20), Color(0xFF0B0D0F)],
+                    ),
+                    border: Border.all(color: on ? const Color(0xFF6EE7B7) : accent.withAlpha(160), width: 2),
+                    boxShadow: [
+                      BoxShadow(color: accent.withAlpha(on ? 150 : 50), blurRadius: on ? 34 : 16, spreadRadius: on ? 3 : 0),
+                      const BoxShadow(color: Colors.black87, blurRadius: 14, offset: Offset(0, 8)),
+                    ],
+                  ),
+                  child: Icon(Icons.power_settings_new, size: 48, color: on ? Colors.black : accent),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class Aurora extends StatelessWidget {
+  final Animation<double> anim;
+  const Aurora({super.key, required this.anim});
+
+  Widget blob(double s, int a) => Container(
+        width: s,
+        height: s,
+        decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [accent.withAlpha(a), accent.withAlpha(0)])),
+      );
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+        child: AnimatedBuilder(
+          animation: anim,
+          builder: (context, _) {
+            final t = anim.value * 2 * math.pi;
+            return Stack(children: [
+              Positioned(top: -120 + 20 * math.sin(t), left: -90 + 30 * math.cos(t), child: blob(340, 44)),
+              Positioned(top: 260 + 24 * math.cos(t), right: -150 + 20 * math.sin(t), child: blob(300, 28)),
+            ]);
+          },
+        ),
+      );
+}
+
 class VpnPage extends StatefulWidget {
   const VpnPage({super.key});
   @override
   State<VpnPage> createState() => _VpnPageState();
 }
 
-class _VpnPageState extends State<VpnPage> {
+class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
+  late final AnimationController glow;
   List<Server> servers = [];
   List<Sub> subs = [];
   String? selLink;
@@ -394,6 +526,7 @@ class _VpnPageState extends State<VpnPage> {
   @override
   void initState() {
     super.initState();
+    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
     v2ray = V2ray(onStatusChanged: onStatus);
     v2ray.initialize(notificationIconResourceType: 'mipmap', notificationIconResourceName: 'ic_launcher').catchError((_) {});
     final raw = prefs.getString('servers2');
@@ -427,6 +560,7 @@ class _VpnPageState extends State<VpnPage> {
 
   @override
   void dispose() {
+    glow.dispose();
     connTimer?.cancel();
     testTimer?.cancel();
     super.dispose();
@@ -741,7 +875,7 @@ class _VpnPageState extends State<VpnPage> {
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 4),
           padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
+          decoration: raised(r: 12),
           child: Column(children: [
             Icon(i, color: accent, size: 18),
             const SizedBox(height: 4),
@@ -770,11 +904,7 @@ class _VpnPageState extends State<VpnPage> {
                     : Colors.redAccent;
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-      decoration: BoxDecoration(
-        color: selected ? accent.withAlpha(30) : cardColor2,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: selected ? accent : Colors.white10),
-      ),
+      decoration: raised(r: 14, selected: selected),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
         onTap: () {
@@ -823,10 +953,9 @@ class _VpnPageState extends State<VpnPage> {
   Widget section({required String id, required String title, required Widget info, required List<Server> list, required Widget trailing}) {
     final isOpen = !collapsed.contains(id);
     return Column(children: [
-      Card(
-        color: cardColor,
+      Container(
         margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: const BorderSide(color: Colors.white12)),
+        decoration: raised(r: 16),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
           onTap: () => setState(() {
@@ -922,18 +1051,12 @@ class _VpnPageState extends State<VpnPage> {
         ],
         bottom: updating ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator(color: accent, minHeight: 2)) : null,
       ),
-      body: Column(children: [
-        const SizedBox(height: 16),
-        GestureDetector(
-          onTap: toggle,
-          child: Container(
-            width: 112,
-            height: 112,
-            decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: accent, width: 3), color: on ? accent : Colors.transparent),
-            child: Icon(Icons.power_settings_new, size: 50, color: on ? Colors.black : accent),
-          ),
-        ),
-        const SizedBox(height: 10),
+      body: Stack(children: [
+        Positioned.fill(child: Aurora(anim: glow)),
+        Column(children: [
+        const SizedBox(height: 4),
+        PowerButton(anim: glow, status: status, onTap: toggle),
+        const SizedBox(height: 2),
         Text(status, style: const TextStyle(color: accent, fontSize: 18)),
         GestureDetector(
           onTap: testConnection,
@@ -987,6 +1110,7 @@ class _VpnPageState extends State<VpnPage> {
               ),
           ]),
         ),
+      ]),
       ]),
     );
   }
