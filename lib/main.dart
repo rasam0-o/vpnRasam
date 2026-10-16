@@ -17,11 +17,58 @@ const cardColor2 = Color(0xFF101315);
 const dnsChannel = MethodChannel('rasam/dns');
 final activeMode = ValueNotifier<String>('none'); // none / vpn / dns
 late SharedPreferences prefs;
+final soundOn = ValueNotifier<bool>(true);
+final soundVol = ValueNotifier<double>(0.7);
+final fxLevel = ValueNotifier<int>(2); // 0 off, 1 low, 2 full
+final subIntervalSec = ValueNotifier<int>(5); // 0 = off
+const sfxChannel = MethodChannel('rasam/sfx');
+
+class Sfx {
+  static Future<void> play(String name) async {
+    if (!soundOn.value) return;
+    try {
+      await sfxChannel.invokeMethod('play', {'name': name, 'volume': soundVol.value});
+    } catch (_) {}
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   prefs = await SharedPreferences.getInstance();
+  soundOn.value = prefs.getBool('sfx_on') ?? true;
+  soundVol.value = prefs.getDouble('sfx_vol') ?? 0.7;
+  fxLevel.value = prefs.getInt('fx') ?? 2;
+  subIntervalSec.value = prefs.getInt('sub_int') ?? 5;
   runApp(const RasamApp());
+}
+
+class TapSound extends StatefulWidget {
+  final Widget child;
+  const TapSound({super.key, required this.child});
+  @override
+  State<TapSound> createState() => _TapSoundState();
+}
+
+class _TapSoundState extends State<TapSound> {
+  Offset? downPos;
+  int downAt = 0;
+
+  @override
+  Widget build(BuildContext context) => Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (e) {
+          downPos = e.position;
+          downAt = DateTime.now().millisecondsSinceEpoch;
+        },
+        onPointerUp: (e) {
+          final d = downPos;
+          if (d != null && (e.position - d).distance < 12 && DateTime.now().millisecondsSinceEpoch - downAt < 350) {
+            Sfx.play('click');
+          }
+          downPos = null;
+        },
+        child: widget.child,
+      );
 }
 
 class RasamApp extends StatelessWidget {
@@ -29,6 +76,7 @@ class RasamApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
+        builder: (context, child) => TapSound(child: child!),
         theme: ThemeData(
           brightness: Brightness.dark,
           scaffoldBackgroundColor: bgColor,
@@ -89,7 +137,7 @@ class _ShellState extends State<Shell> {
   int tab = 0;
   @override
   Widget build(BuildContext context) => Scaffold(
-        body: IndexedStack(index: tab, children: const [VpnPage(), DnsPage()]),
+        body: IndexedStack(index: tab, children: const [VpnPage(), DnsPage(), SettingsPage()]),
         bottomNavigationBar: NavigationBar(
           backgroundColor: bgColor,
           indicatorColor: accent.withAlpha(60),
@@ -98,8 +146,96 @@ class _ShellState extends State<Shell> {
           destinations: const [
             NavigationDestination(icon: Icon(Icons.vpn_key_outlined), selectedIcon: Icon(Icons.vpn_key, color: accent), label: 'VPN'),
             NavigationDestination(icon: Icon(Icons.dns_outlined), selectedIcon: Icon(Icons.dns, color: accent), label: 'DNS'),
+            NavigationDestination(icon: Icon(Icons.tune_outlined), selectedIcon: Icon(Icons.tune, color: accent), label: 'Settings'),
           ],
         ),
+      );
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  Widget header(String t) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 22, 16, 8),
+        child: Text(t, style: const TextStyle(color: accent, fontSize: 14, fontWeight: FontWeight.w600)),
+      );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Settings', style: TextStyle(letterSpacing: 3, fontWeight: FontWeight.bold))),
+        body: ListView(children: [
+          header('Sound'),
+          SwitchListTile(
+            title: const Text('Sound effects'),
+            subtitle: const Text('Taps, connect and disconnect sounds'),
+            value: soundOn.value,
+            onChanged: (v) {
+              setState(() => soundOn.value = v);
+              prefs.setBool('sfx_on', v);
+              if (v) Sfx.play('click');
+            },
+          ),
+          ListTile(
+            title: const Text('Volume'),
+            subtitle: Slider(
+              value: soundVol.value,
+              onChanged: soundOn.value ? (double v) => setState(() => soundVol.value = v) : null,
+              onChangeEnd: (double v) {
+                prefs.setDouble('sfx_vol', v);
+                Sfx.play('click');
+              },
+            ),
+          ),
+          header('Visual effects'),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 0, label: Text('Off')),
+                ButtonSegment(value: 1, label: Text('Low')),
+                ButtonSegment(value: 2, label: Text('Full')),
+              ],
+              selected: {fxLevel.value},
+              onSelectionChanged: (sel) {
+                setState(() => fxLevel.value = sel.first);
+                prefs.setInt('fx', sel.first);
+              },
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Text('Off: no animation. Low: calm glow and rings. Full: glow, rings, lightning and the moving background.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+          ),
+          header('Subscriptions'),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text('Auto-update interval', style: TextStyle(fontSize: 16)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 5, label: Text('5 s')),
+                ButtonSegment(value: 30, label: Text('30 s')),
+                ButtonSegment(value: 300, label: Text('5 min')),
+                ButtonSegment(value: 0, label: Text('Off')),
+              ],
+              selected: {subIntervalSec.value},
+              onSelectionChanged: (sel) {
+                setState(() => subIntervalSec.value = sel.first);
+                prefs.setInt('sub_int', sel.first);
+              },
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 24),
+            child: Text('Updating very often can get your IP blocked by some providers. Use 30 s or more if a subscription stops working.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+          ),
+        ]),
       );
 }
 
@@ -328,18 +464,19 @@ class GlowPainter extends CustomPainter {
   final double t;
   final bool on;
   final bool connecting;
-  GlowPainter({required this.t, required this.on, required this.connecting});
+  final int fx;
+  GlowPainter({required this.t, required this.on, required this.connecting, required this.fx});
 
   @override
   void paint(Canvas canvas, Size size) {
     final c = size.center(Offset.zero);
     const base = 52.0;
-    final pulse = 0.5 + 0.5 * math.sin(t * 2 * math.pi);
+    final pulse = fx >= 2 ? 0.5 + 0.5 * math.sin(t * 2 * math.pi) : 0.5;
     final haloR = base + 30 + (on ? 11 * pulse : 4 * pulse);
     final halo = Paint()
       ..shader = RadialGradient(colors: [accent.withAlpha(on ? 120 : 40), accent.withAlpha(0)]).createShader(Rect.fromCircle(center: c, radius: haloR));
     canvas.drawCircle(c, haloR, halo);
-    if (on || connecting) {
+    if ((on || connecting) && fx >= 1) {
       const n = 3;
       for (var i = 0; i < n; i++) {
         final p = (t * (connecting ? 2 : 1) + i / n) % 1.0;
@@ -353,7 +490,7 @@ class GlowPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(GlowPainter old) => old.t != t || old.on != on || old.connecting != connecting;
+  bool shouldRepaint(GlowPainter old) => old.t != t || old.on != on || old.connecting != connecting || old.fx != fx;
 }
 
 class PowerButton extends StatefulWidget {
@@ -383,7 +520,7 @@ class _PowerButtonState extends State<PowerButton> {
         child: AnimatedBuilder(
           animation: widget.anim,
           builder: (context, _) => CustomPaint(
-            painter: GlowPainter(t: widget.anim.value, on: on, connecting: connecting),
+            painter: GlowPainter(t: widget.anim.value, on: on, connecting: connecting, fx: fxLevel.value),
             child: Center(
               child: AnimatedScale(
                 scale: down ? 0.93 : 1.0,
@@ -415,6 +552,76 @@ class _PowerButtonState extends State<PowerButton> {
   }
 }
 
+class BoltPainter extends CustomPainter {
+  final double t;
+  final bool on;
+  final int fx;
+  BoltPainter({required this.t, required this.on, required this.fx});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final sx = size.width / 70;
+    final sy = size.height / 110;
+    final path = Path()
+      ..moveTo(38 * sx, 0)
+      ..lineTo(8 * sx, 62 * sy)
+      ..lineTo(30 * sx, 62 * sy)
+      ..lineTo(20 * sx, 110 * sy)
+      ..lineTo(62 * sx, 40 * sy)
+      ..lineTo(40 * sx, 40 * sy)
+      ..lineTo(54 * sx, 0)
+      ..close();
+    final flick = on ? (fx >= 2 ? 0.65 + 0.35 * math.sin(t * 2 * math.pi * 6).abs() : 0.9) : 0.35;
+    final glowPaint = Paint()
+      ..color = accent.withAlpha((120 * flick).toInt())
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
+    canvas.drawPath(path, glowPaint);
+    final fill = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [const Color(0xFF6EE7B7).withAlpha((255 * (0.5 + 0.5 * flick)).toInt()), accent.withAlpha((255 * (0.45 + 0.55 * flick)).toInt())],
+      ).createShader(Offset.zero & size);
+    canvas.drawPath(path, fill);
+    if (on && fx >= 2) {
+      final rnd = math.Random((t * 12).floor());
+      final arc = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6
+        ..strokeCap = StrokeCap.round
+        ..color = const Color(0xFF6EE7B7).withAlpha((200 * flick).toInt());
+      for (var k = 0; k < 2; k++) {
+        var x = (k == 0 ? 8 : 62) * sx;
+        var y = (k == 0 ? 62 : 40) * sy;
+        final p = Path()..moveTo(x, y);
+        for (var i = 0; i < 4; i++) {
+          x += (k == 0 ? -1 : 1) * (6 + rnd.nextDouble() * 8) * sx;
+          y += (rnd.nextDouble() - 0.4) * 18 * sy;
+          p.lineTo(x, y);
+        }
+        canvas.drawPath(p, arc);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(BoltPainter o) => o.t != t || o.on != on || o.fx != fx;
+}
+
+class BoltWidget extends StatelessWidget {
+  final Animation<double> anim;
+  final bool on;
+  const BoltWidget({super.key, required this.anim, required this.on});
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+        child: AnimatedBuilder(
+          animation: anim,
+          builder: (context, _) => CustomPaint(size: const Size(70, 110), painter: BoltPainter(t: anim.value, on: on, fx: fxLevel.value)),
+        ),
+      );
+}
+
 class Aurora extends StatelessWidget {
   final Animation<double> anim;
   const Aurora({super.key, required this.anim});
@@ -426,7 +633,9 @@ class Aurora extends StatelessWidget {
       );
 
   @override
-  Widget build(BuildContext context) => IgnorePointer(
+  Widget build(BuildContext context) => fxLevel.value < 2
+      ? const SizedBox.shrink()
+      : IgnorePointer(
         child: AnimatedBuilder(
           animation: anim,
           builder: (context, _) {
@@ -446,8 +655,11 @@ class VpnPage extends StatefulWidget {
   State<VpnPage> createState() => _VpnPageState();
 }
 
-class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
+class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController glow;
+  Timer? subTimer;
+  bool inFg = true;
+  bool bgUpdating = false;
   List<Server> servers = [];
   List<Sub> subs = [];
   String? selLink;
@@ -505,6 +717,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
       downSpeed = st.downloadSpeed as int;
     });
     if (state == 'CONNECTED' && !wasConnected) {
+      Sfx.play('connect');
       testTimer?.cancel();
       testTimer = Timer(const Duration(seconds: 3), testConnection);
     }
@@ -527,6 +740,11 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
   void initState() {
     super.initState();
     glow = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+    WidgetsBinding.instance.addObserver(this);
+    fxLevel.addListener(onFxChanged);
+    subIntervalSec.addListener(restartSubTimer);
+    applyFx();
+    restartSubTimer();
     v2ray = V2ray(onStatusChanged: onStatus);
     v2ray.initialize(notificationIconResourceType: 'mipmap', notificationIconResourceName: 'ic_launcher').catchError((_) {});
     final raw = prefs.getString('servers2');
@@ -558,8 +776,49 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
     });
   }
 
+  void applyFx() {
+    if (fxLevel.value == 0) {
+      glow.stop();
+    } else if (!glow.isAnimating) {
+      glow.repeat();
+    }
+  }
+
+  void onFxChanged() {
+    applyFx();
+    if (mounted) setState(() {});
+  }
+
+  void restartSubTimer() {
+    subTimer?.cancel();
+    final sec = subIntervalSec.value;
+    if (sec <= 0) return;
+    subTimer = Timer.periodic(Duration(seconds: sec), (_) => backgroundUpdate());
+  }
+
+  Future<void> backgroundUpdate() async {
+    if (!inFg || bgUpdating || updating || subs.isEmpty) return;
+    bgUpdating = true;
+    for (final s in List<Sub>.from(subs)) {
+      try {
+        await updateSub(s);
+      } catch (_) {}
+    }
+    bgUpdating = false;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    inFg = state == AppLifecycleState.resumed;
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    fxLevel.removeListener(onFxChanged);
+    subIntervalSec.removeListener(restartSubTimer);
+    subTimer?.cancel();
     glow.dispose();
     connTimer?.cancel();
     testTimer?.cancel();
@@ -597,6 +856,14 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
       if (p != null) fresh.add(p);
     }
     if (fresh.isEmpty) throw Exception('No servers found in this subscription');
+    final old = {for (final e in servers.where((e) => e.group == s.name)) e.link: e};
+    for (final f in fresh) {
+      final o = old[f.link];
+      if (o != null) {
+        f.ping = o.ping;
+        f.sortPing = o.sortPing;
+      }
+    }
     servers.removeWhere((e) => e.group == s.name);
     servers.addAll(fresh);
     s.used = data.used;
@@ -801,6 +1068,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
       wantOn = false;
       lastStopCall = DateTime.now();
       testInfo = '';
+      Sfx.play('disconnect');
       try {
         await v2ray.stopV2Ray();
       } catch (_) {}
@@ -834,6 +1102,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
       connTimer = Timer(const Duration(seconds: 25), () {
         if (mounted && status == 'Connecting…') {
           wantOn = false;
+          Sfx.play('error');
           v2ray.stopV2Ray().catchError((_) {});
           setState(() => status = 'Disconnected');
           showMsg(context, 'Connection timed out');
@@ -850,6 +1119,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
     } catch (e) {
       connTimer?.cancel();
       wantOn = false;
+      Sfx.play('error');
       if (mounted) {
         setState(() => status = 'Disconnected');
         showMsg(context, 'Error: $e');
@@ -1010,21 +1280,6 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
   }
 
   Widget subTrailing(Sub s, List<Server> list) => Row(mainAxisSize: MainAxisSize.min, children: [
-        busySubs.contains(s.name)
-            ? const Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: accent)))
-            : IconButton(
-                icon: const Icon(Icons.refresh, color: accent),
-                onPressed: () async {
-                  setState(() => busySubs.add(s.name));
-                  try {
-                    final n = await updateSub(s);
-                    if (mounted) showMsg(context, 'Updated: $n servers');
-                  } catch (e) {
-                    if (mounted) showMsg(context, 'Failed: ${e.toString().replaceFirst('Exception: ', '')}');
-                  }
-                  if (mounted) setState(() => busySubs.remove(s.name));
-                },
-              ),
         IconButton(icon: const Icon(Icons.speed, color: accent), onPressed: () => pingList(list)),
         PopupMenuButton<String>(
           onSelected: (v) async {
@@ -1042,7 +1297,11 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
     final on = status == 'Connected';
     final local = sorted(servers.where((e) => e.group == 'Manual').toList());
     return Scaffold(
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(tooltip: 'Scan QR code', icon: const Icon(Icons.qr_code_scanner), onPressed: scanQr),
         title: const Text('RASAM', style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold)),
         actions: [
@@ -1053,8 +1312,9 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin {
       ),
       body: Stack(children: [
         Positioned.fill(child: Aurora(anim: glow)),
+        Positioned(right: 6, top: kToolbarHeight + MediaQuery.of(context).padding.top + 34, child: BoltWidget(anim: glow, on: on)),
         Column(children: [
-        const SizedBox(height: 4),
+        SizedBox(height: kToolbarHeight + MediaQuery.of(context).padding.top + 4),
         PowerButton(anim: glow, status: status, onTap: toggle),
         const SizedBox(height: 2),
         Text(status, style: const TextStyle(color: accent, fontSize: 18)),
@@ -1138,7 +1398,8 @@ class DnsPage extends StatefulWidget {
   State<DnsPage> createState() => _DnsPageState();
 }
 
-class _DnsPageState extends State<DnsPage> {
+class _DnsPageState extends State<DnsPage> with SingleTickerProviderStateMixin {
+  late final AnimationController glow;
   final p1 = TextEditingController();
   final p2 = TextEditingController();
   bool busy = false;
@@ -1152,6 +1413,9 @@ class _DnsPageState extends State<DnsPage> {
   @override
   void initState() {
     super.initState();
+    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+    fxLevel.addListener(onFx);
+    applyFx();
     activeMode.addListener(_r);
     p1.text = prefs.getString('dns1') ?? '178.22.122.100';
     p2.text = prefs.getString('dns2') ?? '185.51.200.2';
@@ -1172,7 +1436,22 @@ class _DnsPageState extends State<DnsPage> {
   @override
   void dispose() {
     activeMode.removeListener(_r);
+    fxLevel.removeListener(onFx);
+    glow.dispose();
     super.dispose();
+  }
+
+  void applyFx() {
+    if (fxLevel.value == 0) {
+      glow.stop();
+    } else if (!glow.isAnimating) {
+      glow.repeat();
+    }
+  }
+
+  void onFx() {
+    applyFx();
+    if (mounted) setState(() {});
   }
 
   void saveCustom() => prefs.setString('dnsCustom', jsonEncode(custom.map((e) => {'n': e[0], 'p': e[1], 's': e[2]}).toList()));
@@ -1184,6 +1463,7 @@ class _DnsPageState extends State<DnsPage> {
         await dnsChannel.invokeMethod('stop');
       } catch (_) {}
       activeMode.value = 'none';
+      Sfx.play('disconnect');
       return;
     }
     if (activeMode.value == 'vpn') {
@@ -1198,7 +1478,9 @@ class _DnsPageState extends State<DnsPage> {
       final ok = await dnsChannel.invokeMethod<bool>('start', {'primary': p1.text.trim(), 'secondary': p2.text.trim()});
       if (ok == true) {
         activeMode.value = 'dns';
+        Sfx.play('connect');
       } else if (mounted) {
+        Sfx.play('error');
         showMsg(context, 'Permission was not granted');
       }
     } on MissingPluginException {
@@ -1274,18 +1556,29 @@ class _DnsPageState extends State<DnsPage> {
       );
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
-          toolbarHeight: 72,
-          title: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('DNS', style: TextStyle(fontWeight: FontWeight.bold)),
-            Text('Configuring IPv4', style: TextStyle(fontSize: 14, color: Colors.white60)),
-          ]),
-        ),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
+  Widget build(BuildContext context) {
+    final top = kToolbarHeight + MediaQuery.of(context).padding.top;
+    final dnsStatus = busy ? 'Connecting…' : (on ? 'Connected' : 'Disconnected');
+    return Scaffold(
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        title: const Text('DNS', style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold)),
+      ),
+      body: Stack(children: [
+        Positioned.fill(child: Aurora(anim: glow)),
+        Positioned(right: 6, top: top + 30, child: BoltWidget(anim: glow, on: on)),
+        ListView(padding: EdgeInsets.fromLTRB(16, top + 4, 16, 16), children: [
+          Center(child: PowerButton(anim: glow, status: dnsStatus, onTap: toggle)),
+          Center(child: Text(on ? 'Active' : 'Inactive', style: TextStyle(color: on ? accent : Colors.white54, fontSize: 22))),
+          const SizedBox(height: 4),
+          const Center(child: Text('Configuring IPv4', style: TextStyle(fontSize: 13, color: Colors.white54))),
+          const SizedBox(height: 8),
           field(p1, 'Primary server'),
           field(p2, 'Secondary server'),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           SizedBox(
             height: 52,
             child: OutlinedButton.icon(
@@ -1295,19 +1588,10 @@ class _DnsPageState extends State<DnsPage> {
               onPressed: on ? null : serversSheet,
             ),
           ),
-          const SizedBox(height: 24),
-          SizedBox(
-            height: 54,
-            child: FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
-              onPressed: toggle,
-              child: Text(on ? 'STOP' : 'START', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
-          ),
-          const SizedBox(height: 24),
-          Center(child: Text(on ? 'Active' : 'Inactive', style: TextStyle(color: on ? accent : Colors.white54, fontSize: 26))),
           const SizedBox(height: 16),
           const Text('DNS runs on its own, separate from VPN. Only DNS requests go to the addresses above.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white38, fontSize: 12)),
         ]),
-      );
+      ]),
+    );
+  }
 }
