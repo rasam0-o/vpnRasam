@@ -31,6 +31,33 @@ jobs:
           s=re.sub(r'android:label="[^"]*"','android:label="Rasam"',s)
           open(p,'w').write(s)
           PY
+      - name: Generate app icon
+        continue-on-error: true
+        run: |
+          pip install pillow
+          python3 - <<'PY'
+          from PIL import Image, ImageDraw, ImageFont
+          import os, glob
+          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
+          def make(n):
+              S = n * 4
+              im = Image.new('RGB', (S, S), (11, 13, 14))
+              d = ImageDraw.Draw(im)
+              m = int(S * 0.14)
+              d.rounded_rectangle([m, m, S - m, S - m], radius=int(S * 0.22), outline=(16, 185, 129), width=max(2, int(S * 0.035)))
+              f = None
+              for p in glob.glob('/usr/share/fonts/**/DejaVuSans-Bold.ttf', recursive=True):
+                  f = ImageFont.truetype(p, int(S * 0.52))
+                  break
+              if f is None:
+                  f = ImageFont.load_default(int(S * 0.52))
+              d.text((S / 2, S / 2), 'R', font=f, fill=(16, 185, 129), anchor='mm')
+              return im.resize((n, n), Image.LANCZOS)
+          for k, n in sizes.items():
+              p = 'android/app/src/main/res/mipmap-%s/ic_launcher.png' % k
+              if os.path.exists(p):
+                  make(n).save(p)
+          PY
       - name: Set minSdk
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' android/app/build.gradle*
       - run: flutter pub get
