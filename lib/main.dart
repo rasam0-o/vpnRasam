@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_v2ray_client/flutter_v2ray.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -239,14 +240,58 @@ class ScanPage extends StatefulWidget {
 
 class _ScanPageState extends State<ScanPage> {
   bool done = false;
+
+  Future<void> pickImage() async {
+    try {
+      final x = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (x == null) return;
+      final ctl = MobileScannerController();
+      final cap = await ctl.analyzeImage(x.path);
+      await ctl.dispose();
+      String? v;
+      if (cap != null) {
+        for (final b in cap.barcodes) {
+          final r = b.rawValue;
+          if (r != null && r.isNotEmpty) {
+            v = r;
+            break;
+          }
+        }
+      }
+      if (!mounted) return;
+      if (v == null) {
+        showMsg(context, 'No QR code found in this image');
+        return;
+      }
+      done = true;
+      Navigator.pop(context, v);
+    } catch (e) {
+      if (mounted) showMsg(context, 'Could not read the image: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Scan QR code')),
+        appBar: AppBar(
+          title: const Text('Scan QR code'),
+          actions: [IconButton(tooltip: 'Choose image', icon: const Icon(Icons.image_outlined), onPressed: pickImage)],
+        ),
         body: MobileScanner(
           errorBuilder: (context, error, child) => Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
-              child: Text('Camera error: ${error.errorCode.name}\n${error.errorDetails?.message ?? ''}\n\nCheck that Rasam has camera permission in Android settings.', textAlign: TextAlign.center),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text('Camera error: ${error.errorCode.name}', textAlign: TextAlign.center),
+                const SizedBox(height: 8),
+                Text(error.errorDetails?.message ?? '', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                const SizedBox(height: 20),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(backgroundColor: accent, foregroundColor: Colors.black),
+                  icon: const Icon(Icons.image_outlined),
+                  label: const Text('Choose a QR image instead'),
+                  onPressed: pickImage,
+                ),
+              ]),
             ),
           ),
           onDetect: (capture) {
