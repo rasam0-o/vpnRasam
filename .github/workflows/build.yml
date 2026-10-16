@@ -38,25 +38,42 @@ jobs:
           python3 - <<'PY'
           from PIL import Image, ImageDraw, ImageFont
           import os, glob
-          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
-          def make(n):
-              S = n * 4
-              im = Image.new('RGB', (S, S), (11, 13, 14))
-              d = ImageDraw.Draw(im)
-              m = int(S * 0.14)
-              d.rounded_rectangle([m, m, S - m, S - m], radius=int(S * 0.22), outline=(16, 185, 129), width=max(2, int(S * 0.035)))
-              f = None
+
+          RES = 'android/app/src/main/res'
+          EMERALD = (16, 185, 129, 255)
+          BG = (11, 13, 14, 255)
+
+          def font(px):
               for p in glob.glob('/usr/share/fonts/**/DejaVuSans-Bold.ttf', recursive=True):
-                  f = ImageFont.truetype(p, int(S * 0.52))
-                  break
-              if f is None:
-                  f = ImageFont.load_default(int(S * 0.52))
-              d.text((S / 2, S / 2), 'R', font=f, fill=(16, 185, 129), anchor='mm')
+                  return ImageFont.truetype(p, px)
+              return ImageFont.load_default(px)
+
+          def art(n, opaque, box):
+              S = n * 4
+              im = Image.new('RGBA', (S, S), BG if opaque else (0, 0, 0, 0))
+              d = ImageDraw.Draw(im)
+              m = int(S * (1 - box) / 2)
+              d.rounded_rectangle([m, m, S - m, S - m], radius=int(S * box * 0.26), outline=EMERALD, width=max(2, int(S * box * 0.05)))
+              d.text((S / 2, S / 2), 'R', font=font(int(S * box * 0.62)), fill=EMERALD, anchor='mm')
               return im.resize((n, n), Image.LANCZOS)
+
+          # 1) legacy icons (all densities)
+          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
           for k, n in sizes.items():
-              p = 'android/app/src/main/res/mipmap-%s/ic_launcher.png' % k
+              p = RES + '/mipmap-%s/ic_launcher.png' % k
               if os.path.exists(p):
-                  make(n).save(p)
+                  art(n, True, 0.72).save(p)
+
+          # 2) adaptive icon (Android 8+), replaces any adaptive icon the template made
+          for f in glob.glob(RES + '/mipmap-anydpi*/ic_launcher*.xml'):
+              os.remove(f)
+          os.makedirs(RES + '/mipmap-anydpi-v26', exist_ok=True)
+          os.makedirs(RES + '/drawable-nodpi', exist_ok=True)
+          os.makedirs(RES + '/values', exist_ok=True)
+          art(432, False, 0.56).save(RES + '/drawable-nodpi/rasam_icon_fg.png')
+          open(RES + '/values/rasam_icon.xml', 'w').write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="rasam_icon_bg">#0B0D0E</color>\n</resources>\n')
+          open(RES + '/mipmap-anydpi-v26/ic_launcher.xml', 'w').write('<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/rasam_icon_bg"/>\n    <foreground android:drawable="@drawable/rasam_icon_fg"/>\n</adaptive-icon>\n')
+          print('icons written')
           PY
       - name: Set minSdk
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' android/app/build.gradle*
