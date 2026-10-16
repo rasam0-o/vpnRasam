@@ -75,10 +75,49 @@ jobs:
           open(RES + '/mipmap-anydpi-v26/ic_launcher.xml', 'w').write('<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n    <background android:drawable="@color/rasam_icon_bg"/>\n    <foreground android:drawable="@drawable/rasam_icon_fg"/>\n</adaptive-icon>\n')
           print('icons written')
           PY
+      - name: Generate sound effects
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import wave, struct, math, os
+
+          OUT = 'android/app/src/main/res/raw'
+          os.makedirs(OUT, exist_ok=True)
+          SR = 22050
+
+          def write(name, samples):
+              with wave.open('%s/sfx_%s.wav' % (OUT, name), 'wb') as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(SR)
+                  w.writeframes(b''.join(struct.pack('<h', max(-32767, min(32767, int(s * 32767)))) for s in samples))
+
+          def tone(freq, dur, vol=0.5, decay=6.0, harm=0.0):
+              n = int(SR * dur)
+              out = []
+              for i in range(n):
+                  t = i / SR
+                  env = math.exp(-decay * i / n) * min(1.0, i / (SR * 0.003)) * min(1.0, (n - i) / (SR * 0.006))
+                  v = math.sin(2 * math.pi * freq * t) + harm * math.sin(2 * math.pi * freq * 2 * t)
+                  out.append(v * env * vol / (1 + harm))
+              return out
+
+          def seq(parts):
+              out = []
+              for p in parts:
+                  out += p
+              return out
+
+          write('click', tone(1800, 0.035, 0.5, 5))
+          write('connect', seq([tone(523, 0.11, 0.6, 3, 0.3), tone(659, 0.11, 0.6, 3, 0.3), tone(784, 0.11, 0.6, 3, 0.3), tone(1047, 0.30, 0.6, 4, 0.3)]))
+          write('disconnect', seq([tone(784, 0.10, 0.6, 3, 0.3), tone(587, 0.10, 0.6, 3, 0.3), tone(392, 0.26, 0.6, 4, 0.3)]))
+          write('error', seq([tone(220, 0.14, 0.6, 2, 0.5), [0.0] * int(SR * 0.04), tone(196, 0.22, 0.6, 3, 0.5)]))
+          print('sounds written')
+          PY
       - name: Set minSdk
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' android/app/build.gradle*
       - run: flutter pub get
-      - run: flutter build apk --release --no-shrink
+      - run: flutter build apk --release --no-shrink --build-number=${{ github.run_number }}
       - name: Sign APK
         env:
           KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
