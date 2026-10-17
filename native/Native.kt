@@ -40,6 +40,44 @@ class MainActivity : FlutterActivity() {
                 result.notImplemented()
             }
         }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/store").setMethodCallHandler { call, result ->
+            try {
+                val sp = getSharedPreferences("rasam_store", MODE_PRIVATE)
+                when (call.method) {
+                    "getAll" -> {
+                        val out = HashMap<String, String>()
+                        for ((k, v) in sp.all) {
+                            if (v is String) {
+                                out[k] = v
+                            }
+                        }
+                        result.success(out)
+                    }
+                    "set" -> {
+                        val key = call.argument<String>("key") ?: ""
+                        val value = call.argument<String>("value")
+                        if (value == null) {
+                            sp.edit().remove(key).apply()
+                        } else {
+                            sp.edit().putString(key, value).apply()
+                        }
+                        result.success(null)
+                    }
+                    "legacy" -> {
+                        val out = HashMap<String, String>()
+                        for ((k, v) in getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE).all) {
+                            if (k.startsWith("flutter.") && v is String && !v.startsWith("VGhpcy")) {
+                                out[k.substring(8)] = v
+                            }
+                        }
+                        result.success(out)
+                    }
+                    else -> result.notImplemented()
+                }
+            } catch (e: Exception) {
+                result.error("store", e.message, null)
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/dns").setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
