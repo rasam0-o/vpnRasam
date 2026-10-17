@@ -8,7 +8,6 @@ import 'package:flutter_v2ray_client/flutter_v2ray.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 const accent = Color(0xFF10B981);
 const bgColor = Color(0xFF0B0D0E);
@@ -16,7 +15,86 @@ const cardColor = Color(0xFF15181B);
 const cardColor2 = Color(0xFF101315);
 const dnsChannel = MethodChannel('rasam/dns');
 final activeMode = ValueNotifier<String>('none'); // none / vpn / dns
-late SharedPreferences prefs;
+late Store prefs;
+
+/// Small key-value store backed by Android SharedPreferences through our own channel.
+class Store {
+  static const _ch = MethodChannel('rasam/store');
+  final Map<String, dynamic> _m = {};
+
+  static Future<Store> load() async {
+    final s = Store();
+    try {
+      final raw = await _ch.invokeMethod<Map>('getAll');
+      raw?.forEach((k, v) {
+        try {
+          s._m[k as String] = jsonDecode(v as String);
+        } catch (_) {}
+      });
+      if (s._m.isEmpty) {
+        // first run after the switch: bring over data saved by the old storage
+        final old = await _ch.invokeMethod<Map>('legacy');
+        old?.forEach((k, v) => s._put(k as String, v as String));
+      }
+    } catch (_) {}
+    return s;
+  }
+
+  void _put(String k, dynamic v) {
+    _m[k] = v;
+    _ch.invokeMethod('set', {'key': k, 'value': jsonEncode(v)}).catchError((_) {});
+  }
+
+  String? getString(String k) {
+    final v = _m[k];
+    return v is String ? v : null;
+  }
+
+  bool? getBool(String k) {
+    final v = _m[k];
+    return v is bool ? v : null;
+  }
+
+  int? getInt(String k) {
+    final v = _m[k];
+    return v is num ? v.toInt() : null;
+  }
+
+  double? getDouble(String k) {
+    final v = _m[k];
+    return v is num ? v.toDouble() : null;
+  }
+
+  List<String>? getStringList(String k) {
+    final v = _m[k];
+    return v is List ? v.map((e) => e.toString()).toList() : null;
+  }
+
+  Future<bool> setString(String k, String v) async {
+    _put(k, v);
+    return true;
+  }
+
+  Future<bool> setBool(String k, bool v) async {
+    _put(k, v);
+    return true;
+  }
+
+  Future<bool> setInt(String k, int v) async {
+    _put(k, v);
+    return true;
+  }
+
+  Future<bool> setDouble(String k, double v) async {
+    _put(k, v);
+    return true;
+  }
+
+  Future<bool> setStringList(String k, List<String> v) async {
+    _put(k, v);
+    return true;
+  }
+}
 final soundOn = ValueNotifier<bool>(true);
 final soundVol = ValueNotifier<double>(0.7);
 final fxLevel = ValueNotifier<int>(2); // 0 off, 1 low, 2 full
@@ -52,7 +130,7 @@ Future<void> main() async {
       );
   runApp(const BootApp());
   try {
-    prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 10));
+    prefs = await Store.load().timeout(const Duration(seconds: 10));
     soundOn.value = prefs.getBool('sfx_on') ?? true;
     soundVol.value = prefs.getDouble('sfx_vol') ?? 0.7;
     fxLevel.value = prefs.getInt('fx') ?? 2;
