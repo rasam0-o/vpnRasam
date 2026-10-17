@@ -34,12 +34,63 @@ class Sfx {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  prefs = await SharedPreferences.getInstance();
-  soundOn.value = prefs.getBool('sfx_on') ?? true;
-  soundVol.value = prefs.getDouble('sfx_vol') ?? 0.7;
-  fxLevel.value = prefs.getInt('fx') ?? 2;
-  subIntervalSec.value = prefs.getInt('sub_int') ?? 5;
-  runApp(const RasamApp());
+  ErrorWidget.builder = (d) => Directionality(
+        textDirection: TextDirection.ltr,
+        child: ColoredBox(
+          color: bgColor,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Center(
+              child: Text(
+                'Something went wrong:\n${d.exceptionAsString()}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.redAccent, fontSize: 12, decoration: TextDecoration.none),
+              ),
+            ),
+          ),
+        ),
+      );
+  runApp(const BootApp());
+  try {
+    prefs = await SharedPreferences.getInstance().timeout(const Duration(seconds: 10));
+    soundOn.value = prefs.getBool('sfx_on') ?? true;
+    soundVol.value = prefs.getDouble('sfx_vol') ?? 0.7;
+    fxLevel.value = prefs.getInt('fx') ?? 2;
+    subIntervalSec.value = prefs.getInt('sub_int') ?? 5;
+    runApp(const RasamApp());
+  } catch (e, st) {
+    runApp(CrashApp(message: '$e\n\n$st'));
+  }
+}
+
+class BootApp extends StatelessWidget {
+  const BootApp({super.key});
+  @override
+  Widget build(BuildContext context) => const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: bgColor,
+          body: Center(child: CircularProgressIndicator(color: accent)),
+        ),
+      );
+}
+
+class CrashApp extends StatelessWidget {
+  final String message;
+  const CrashApp({super.key, required this.message});
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: bgColor,
+          body: SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Text('Startup error:\n\n$message', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ),
+          ),
+        ),
+      );
 }
 
 class TapSound extends StatefulWidget {
