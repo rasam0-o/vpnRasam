@@ -112,6 +112,7 @@ jobs:
           write('connect', seq([tone(523, 0.11, 0.6, 3, 0.3), tone(659, 0.11, 0.6, 3, 0.3), tone(784, 0.11, 0.6, 3, 0.3), tone(1047, 0.30, 0.6, 4, 0.3)]))
           write('disconnect', seq([tone(784, 0.10, 0.6, 3, 0.3), tone(587, 0.10, 0.6, 3, 0.3), tone(392, 0.26, 0.6, 4, 0.3)]))
           write('error', seq([tone(220, 0.14, 0.6, 2, 0.5), [0.0] * int(SR * 0.04), tone(196, 0.22, 0.6, 3, 0.5)]))
+          open(OUT + '/keep.xml', 'w').write('<?xml version="1.0" encoding="utf-8"?>\n<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@raw/sfx_*" />\n')
           print('sounds written')
           PY
       - name: Set minSdk
