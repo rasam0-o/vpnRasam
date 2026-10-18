@@ -117,6 +117,16 @@ jobs:
           PY
       - name: Set minSdk
         run: sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/; s/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/' android/app/build.gradle*
+      - name: Add Google code scanner dependency
+        run: |
+          F=$(ls android/app/build.gradle.kts android/app/build.gradle 2>/dev/null | head -1)
+          echo "Patching $F"
+          if [[ "$F" == *.kts ]]; then
+            printf '\ndependencies {\n    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")\n}\n' >> "$F"
+          else
+            printf "\ndependencies {\n    implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'\n}\n" >> "$F"
+          fi
+          tail -5 "$F"
       - run: flutter pub get
       - run: flutter build apk --release --no-shrink --build-number=${{ github.run_number }}
       - name: Sign APK
