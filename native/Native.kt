@@ -25,20 +25,26 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/sfx").setMethodCallHandler { call, result ->
-            if (call.method == "play") {
-                try {
-                    initSounds()
-                    val id = soundIds[call.argument<String>("name") ?: "click"]
+            var msg = "ok"
+            try {
+                initSounds()
+                if (call.method == "play") {
+                    val name = call.argument<String>("name") ?: "click"
+                    val id = soundIds[name]
                     val v = (call.argument<Double>("volume") ?: 0.7).toFloat()
-                    if (id != null) {
-                        pool?.play(id, v, v, 1, 0, 1f)
+                    if (id == null) {
+                        msg = "missing sound: " + name + " (loaded " + soundIds.size + ")"
+                    } else {
+                        val sid = pool?.play(id, v, v, 1, 0, 1f) ?: 0
+                        if (sid == 0) {
+                            msg = "not ready yet, try again"
+                        }
                     }
-                } catch (e: Exception) {
                 }
-                result.success(null)
-            } else {
-                result.notImplemented()
+            } catch (e: Exception) {
+                msg = "error: " + e.message
             }
+            result.success(msg)
         }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/store").setMethodCallHandler { call, result ->
             try {
@@ -106,7 +112,7 @@ class MainActivity : FlutterActivity() {
     private fun initSounds() {
         if (pool != null) return
         val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
         val p = SoundPool.Builder().setMaxStreams(4).setAudioAttributes(attrs).build()
