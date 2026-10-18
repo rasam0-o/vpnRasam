@@ -387,6 +387,19 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: EdgeInsets.fromLTRB(16, 8, 16, 24),
             child: Text('Subscriptions refresh by themselves at this interval while the app is open.', style: TextStyle(color: Colors.white54, fontSize: 12)),
           ),
+          header('About'),
+          ListTile(
+            leading: Container(
+              width: 44,
+              height: 44,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: cardColor, borderRadius: BorderRadius.circular(12), border: Border.all(color: accent, width: 1.5)),
+              child: const Text('R', style: TextStyle(color: accent, fontSize: 22, fontWeight: FontWeight.bold)),
+            ),
+            title: const Text('Rasam'),
+            subtitle: const Text('Created by Rasam Sadeqy'),
+          ),
+          const SizedBox(height: 24),
         ]),
       );
 }
@@ -1113,8 +1126,20 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, 
   }
 
   Future<void> scanQr() async {
-    final v = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const ScanPage()));
-    if (v != null && mounted) await importText(v);
+    String? v;
+    var fallback = false;
+    try {
+      v = await const MethodChannel('rasam/scan').invokeMethod<String>('scan');
+    } on PlatformException catch (e) {
+      fallback = true;
+      if (mounted) showMsg(context, 'Google scanner is not available (${e.message}). Opening the backup scanner.');
+    } on MissingPluginException {
+      fallback = true;
+    }
+    if (fallback && mounted) {
+      v = await Navigator.push<String>(context, MaterialPageRoute(builder: (_) => const ScanPage()));
+    }
+    if (v != null && v.isNotEmpty && mounted) await importText(v);
   }
 
   Future<void> pingList(List<Server> list) async {
