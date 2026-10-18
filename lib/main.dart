@@ -98,15 +98,23 @@ class Store {
 final soundOn = ValueNotifier<bool>(true);
 final soundVol = ValueNotifier<double>(0.7);
 final fxLevel = ValueNotifier<int>(2); // 0 off, 1 low, 2 full
-final subIntervalSec = ValueNotifier<int>(5); // 0 = off
+final subIntervalSec = ValueNotifier<int>(60); // seconds, 0 = off
 const sfxChannel = MethodChannel('rasam/sfx');
 
 class Sfx {
-  static Future<void> play(String name) async {
-    if (!soundOn.value) return;
+  static Future<void> init() async {
     try {
-      await sfxChannel.invokeMethod('play', {'name': name, 'volume': soundVol.value});
+      await sfxChannel.invokeMethod('init');
     } catch (_) {}
+  }
+
+  static Future<String?> play(String name) async {
+    if (!soundOn.value) return 'sound effects are off';
+    try {
+      return await sfxChannel.invokeMethod<String>('play', {'name': name, 'volume': soundVol.value});
+    } catch (e) {
+      return 'error: $e';
+    }
   }
 }
 
@@ -134,8 +142,10 @@ Future<void> main() async {
     soundOn.value = prefs.getBool('sfx_on') ?? true;
     soundVol.value = prefs.getDouble('sfx_vol') ?? 0.7;
     fxLevel.value = prefs.getInt('fx') ?? 2;
-    subIntervalSec.value = prefs.getInt('sub_int') ?? 5;
+    final si = prefs.getInt('sub_int') ?? 60;
+    subIntervalSec.value = (si == 0 || si == 60 || si == 300) ? si : 60;
     runApp(const RasamApp());
+    Sfx.init();
   } catch (e, st) {
     runApp(CrashApp(message: '$e\n\n$st'));
   }
@@ -319,6 +329,15 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
+          ListTile(
+            leading: const Icon(Icons.volume_up_outlined, color: accent),
+            title: const Text('Test sound'),
+            subtitle: const Text('Plays the connect sound and shows the result'),
+            onTap: () async {
+              final r = await Sfx.play('connect');
+              if (mounted) showMsg(context, 'Sound: $r');
+            },
+          ),
           header('Visual effects'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -335,6 +354,11 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
+          if (MediaQuery.of(context).disableAnimations)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Text('Animations are turned off in your phone settings (Remove animations / Animator scale). Rasam effects still run.', style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+            ),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: Text('Off: no animation. Low: calm glow and rings. Full: glow, rings, lightning and the moving background.', style: TextStyle(color: Colors.white54, fontSize: 12)),
@@ -348,8 +372,7 @@ class _SettingsPageState extends State<SettingsPage> {
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: SegmentedButton<int>(
               segments: const [
-                ButtonSegment(value: 5, label: Text('5 s')),
-                ButtonSegment(value: 30, label: Text('30 s')),
+                ButtonSegment(value: 60, label: Text('1 min')),
                 ButtonSegment(value: 300, label: Text('5 min')),
                 ButtonSegment(value: 0, label: Text('Off')),
               ],
@@ -362,7 +385,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 8, 16, 24),
-            child: Text('Updating very often can get your IP blocked by some providers. Use 30 s or more if a subscription stops working.', style: TextStyle(color: Colors.white54, fontSize: 12)),
+            child: Text('Subscriptions refresh by themselves at this interval while the app is open.', style: TextStyle(color: Colors.white54, fontSize: 12)),
           ),
         ]),
       );
@@ -601,10 +624,17 @@ class GlowPainter extends CustomPainter {
     final c = size.center(Offset.zero);
     const base = 52.0;
     final pulse = fx >= 2 ? 0.5 + 0.5 * math.sin(t * 2 * math.pi) : 0.5;
-    final haloR = base + 30 + (on ? 11 * pulse : 4 * pulse);
+    final haloR = base + 30 + (on ? 11 * pulse : 7 * pulse);
     final halo = Paint()
       ..shader = RadialGradient(colors: [accent.withAlpha(on ? 120 : 40), accent.withAlpha(0)]).createShader(Rect.fromCircle(center: c, radius: haloR));
     canvas.drawCircle(c, haloR, halo);
+    if (!(on || connecting) && fx >= 2) {
+      final idle = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..color = accent.withAlpha(((1 - t) * 70).toInt());
+      canvas.drawCircle(c, base + 4 + t * 38, idle);
+    }
     if ((on || connecting) && fx >= 1) {
       const n = 3;
       for (var i = 0; i < n; i++) {
@@ -681,79 +711,93 @@ class _PowerButtonState extends State<PowerButton> {
   }
 }
 
-class BoltPainter extends CustomPainter {
+class LightningPainter extends CustomPainter {
   final double t;
   final bool on;
   final int fx;
-  BoltPainter({required this.t, required this.on, required this.fx});
+  LightningPainter({required this.t, required this.on, required this.fx});
+
+  Path bolt(math.Random r, Offset a, Offset b, double amp, List<Path> branches) {
+    final path = Path()..moveTo(a.dx, a.dy);
+    const n = 16;
+    final d = b - a;
+    final len = d.distance;
+    final nx = -d.dy / len;
+    final ny = d.dx / len;
+    for (var i = 1; i <= n; i++) {
+      final f = i / n;
+      final off = i == n ? 0.0 : (r.nextDouble() - 0.5) * 2 * amp;
+      final p = Offset(a.dx + d.dx * f + nx * off, a.dy + d.dy * f + ny * off);
+      path.lineTo(p.dx, p.dy);
+      if (i % 5 == 2 && i < n - 1) {
+        final br = Path()..moveTo(p.dx, p.dy);
+        var q = p;
+        for (var k = 0; k < 3; k++) {
+          q = Offset(q.dx - (8 + r.nextDouble() * 14), q.dy + (6 + r.nextDouble() * 26));
+          br.lineTo(q.dx, q.dy);
+        }
+        branches.add(br);
+      }
+    }
+    return path;
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final sx = size.width / 70;
-    final sy = size.height / 110;
-    final path = Path()
-      ..moveTo(38 * sx, 0)
-      ..lineTo(8 * sx, 62 * sy)
-      ..lineTo(30 * sx, 62 * sy)
-      ..lineTo(20 * sx, 110 * sy)
-      ..lineTo(62 * sx, 40 * sy)
-      ..lineTo(40 * sx, 40 * sy)
-      ..lineTo(54 * sx, 0)
-      ..close();
-    final flick = on ? (fx >= 2 ? 0.65 + 0.35 * math.sin(t * 2 * math.pi * 6).abs() : 0.9) : 0.35;
-    final glowPaint = Paint()
-      ..color = accent.withAlpha((120 * flick).toInt())
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
-    canvas.drawPath(path, glowPaint);
-    final fill = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [const Color(0xFF6EE7B7).withAlpha((255 * (0.5 + 0.5 * flick)).toInt()), accent.withAlpha((255 * (0.45 + 0.55 * flick)).toInt())],
-      ).createShader(Offset.zero & size);
-    canvas.drawPath(path, fill);
-    if (on && fx >= 2) {
-      final rnd = math.Random((t * 12).floor());
-      final arc = Paint()
+    if (fx == 0) return;
+    const slots = 5;
+    final animated = fx >= 2;
+    final slot = animated ? (t * slots).floor() : 0;
+    final local = animated ? t * slots - slot : 0.0;
+    final flash = animated ? math.exp(-local * 4.5) : 0.0;
+    final flicker = animated ? 0.7 + 0.3 * math.sin(local * 60) : 1.0;
+    final base = on ? 0.30 : 0.14;
+    final b = (base + (on ? 0.70 : 0.45) * flash * flicker).clamp(0.0, 1.0).toDouble();
+    final w = size.width;
+    final h = size.height;
+    final starts = [Offset(w * 0.93, h * 0.10), Offset(w * 0.94, h * 0.27)];
+    final end = Offset(0, h * 0.76);
+    for (var i = 0; i < 2; i++) {
+      final r = math.Random(slot * 7 + i * 131 + 3);
+      final branches = <Path>[];
+      final path = bolt(r, starts[i], end, w * 0.045, branches);
+      final glowMain = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 7
+        ..strokeJoin = StrokeJoin.round
+        ..color = accent.withAlpha((90 * b).toInt())
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 9);
+      final coreMain = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.6
-        ..strokeCap = StrokeCap.round
-        ..color = const Color(0xFF6EE7B7).withAlpha((200 * flick).toInt());
-      for (var k = 0; k < 2; k++) {
-        var x = (k == 0 ? 8 : 62) * sx;
-        var y = (k == 0 ? 62 : 40) * sy;
-        final p = Path()..moveTo(x, y);
-        for (var i = 0; i < 4; i++) {
-          x += (k == 0 ? -1 : 1) * (6 + rnd.nextDouble() * 8) * sx;
-          y += (rnd.nextDouble() - 0.4) * 18 * sy;
-          p.lineTo(x, y);
-        }
-        canvas.drawPath(p, arc);
+        ..strokeJoin = StrokeJoin.round
+        ..color = const Color(0xFF6EE7B7).withAlpha((230 * b).toInt());
+      canvas.drawPath(path, glowMain);
+      canvas.drawPath(path, coreMain);
+      final glowBr = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4
+        ..color = accent.withAlpha((70 * b).toInt())
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
+      final coreBr = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0
+        ..color = const Color(0xFF6EE7B7).withAlpha((200 * b).toInt());
+      for (final br in branches) {
+        canvas.drawPath(br, glowBr);
+        canvas.drawPath(br, coreBr);
       }
     }
   }
 
   @override
-  bool shouldRepaint(BoltPainter o) => o.t != t || o.on != on || o.fx != fx;
-}
-
-class BoltWidget extends StatelessWidget {
-  final Animation<double> anim;
-  final bool on;
-  const BoltWidget({super.key, required this.anim, required this.on});
-
-  @override
-  Widget build(BuildContext context) => IgnorePointer(
-        child: AnimatedBuilder(
-          animation: anim,
-          builder: (context, _) => CustomPaint(size: const Size(70, 110), painter: BoltPainter(t: anim.value, on: on, fx: fxLevel.value)),
-        ),
-      );
+  bool shouldRepaint(LightningPainter o) => o.t != t || o.on != on || o.fx != fx;
 }
 
 class Aurora extends StatelessWidget {
   final Animation<double> anim;
-  const Aurora({super.key, required this.anim});
+  final bool on;
+  const Aurora({super.key, required this.anim, this.on = false});
 
   Widget blob(double s, int a) => Container(
         width: s,
@@ -762,20 +806,25 @@ class Aurora extends StatelessWidget {
       );
 
   @override
-  Widget build(BuildContext context) => fxLevel.value < 2
-      ? const SizedBox.shrink()
-      : IgnorePointer(
+  Widget build(BuildContext context) {
+    final fx = fxLevel.value;
+    if (fx == 0) return const SizedBox.shrink();
+    return RepaintBoundary(
+      child: IgnorePointer(
         child: AnimatedBuilder(
           animation: anim,
           builder: (context, _) {
             final t = anim.value * 2 * math.pi;
             return Stack(children: [
-              Positioned(top: -120 + 20 * math.sin(t), left: -90 + 30 * math.cos(t), child: blob(340, 44)),
-              Positioned(top: 260 + 24 * math.cos(t), right: -150 + 20 * math.sin(t), child: blob(300, 28)),
+              if (fx >= 2) Positioned(top: -120 + 20 * math.sin(t), left: -90 + 30 * math.cos(t), child: blob(340, 44)),
+              if (fx >= 2) Positioned(top: 260 + 24 * math.cos(t), right: -150 + 20 * math.sin(t), child: blob(300, 28)),
+              Positioned.fill(child: CustomPaint(painter: LightningPainter(t: anim.value, on: on, fx: fx))),
             ]);
           },
         ),
-      );
+      ),
+    );
+  }
 }
 
 class VpnPage extends StatefulWidget {
@@ -868,7 +917,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, 
   @override
   void initState() {
     super.initState();
-    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4), animationBehavior: AnimationBehavior.preserve)..repeat();
     WidgetsBinding.instance.addObserver(this);
     fxLevel.addListener(onFxChanged);
     subIntervalSec.addListener(restartSubTimer);
@@ -1201,7 +1250,12 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, 
       try {
         await v2ray.stopV2Ray();
       } catch (_) {}
-      setState(() => status = 'Disconnected');
+      setState(() {
+        status = 'Disconnected';
+        duration = '00:00:00';
+        upSpeed = 0;
+        downSpeed = 0;
+      });
       if (activeMode.value == 'vpn') activeMode.value = 'none';
       return;
     }
@@ -1440,8 +1494,7 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, 
         bottom: updating ? const PreferredSize(preferredSize: Size.fromHeight(2), child: LinearProgressIndicator(color: accent, minHeight: 2)) : null,
       ),
       body: Stack(children: [
-        Positioned.fill(child: Aurora(anim: glow)),
-        Positioned(right: 6, top: kToolbarHeight + MediaQuery.of(context).padding.top + 34, child: BoltWidget(anim: glow, on: on)),
+        Positioned.fill(child: Aurora(anim: glow, on: on)),
         Column(children: [
         SizedBox(height: kToolbarHeight + MediaQuery.of(context).padding.top + 4),
         PowerButton(anim: glow, status: status, onTap: toggle),
@@ -1458,9 +1511,9 @@ class _VpnPageState extends State<VpnPage> with SingleTickerProviderStateMixin, 
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8),
           child: Row(children: [
-            statBox(Icons.timer_outlined, 'Time', duration),
-            statBox(Icons.arrow_downward, 'Download', fmtSpeed(downSpeed)),
-            statBox(Icons.arrow_upward, 'Upload', fmtSpeed(upSpeed)),
+            statBox(Icons.timer_outlined, 'Time', on ? duration : '00:00:00'),
+            statBox(Icons.arrow_downward, 'Download', on ? fmtSpeed(downSpeed) : '0 B/s'),
+            statBox(Icons.arrow_upward, 'Upload', on ? fmtSpeed(upSpeed) : '0 B/s'),
           ]),
         ),
         const SizedBox(height: 8),
@@ -1542,7 +1595,7 @@ class _DnsPageState extends State<DnsPage> with SingleTickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+    glow = AnimationController(vsync: this, duration: const Duration(seconds: 4), animationBehavior: AnimationBehavior.preserve)..repeat();
     fxLevel.addListener(onFx);
     applyFx();
     activeMode.addListener(_r);
@@ -1697,8 +1750,7 @@ class _DnsPageState extends State<DnsPage> with SingleTickerProviderStateMixin {
         title: const Text('DNS', style: TextStyle(letterSpacing: 4, fontWeight: FontWeight.bold)),
       ),
       body: Stack(children: [
-        Positioned.fill(child: Aurora(anim: glow)),
-        Positioned(right: 6, top: top + 30, child: BoltWidget(anim: glow, on: on)),
+        Positioned.fill(child: Aurora(anim: glow, on: on)),
         ListView(padding: EdgeInsets.fromLTRB(16, top + 4, 16, 16), children: [
           Center(child: PowerButton(anim: glow, status: dnsStatus, onTap: toggle)),
           Center(child: Text(on ? 'Active' : 'Inactive', style: TextStyle(color: on ? accent : Colors.white54, fontSize: 22))),
