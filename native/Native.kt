@@ -6,6 +6,9 @@ import android.net.VpnService
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.ParcelFileDescriptor
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -45,6 +48,23 @@ class MainActivity : FlutterActivity() {
                 msg = "error: " + e.message
             }
             result.success(msg)
+        }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/scan").setMethodCallHandler { call, result ->
+            if (call.method == "scan") {
+                try {
+                    val options = GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                        .build()
+                    GmsBarcodeScanning.getClient(this, options).startScan()
+                        .addOnSuccessListener { barcode -> result.success(barcode.rawValue) }
+                        .addOnCanceledListener { result.success(null) }
+                        .addOnFailureListener { e -> result.error("scan", e.message, null) }
+                } catch (e: Exception) {
+                    result.error("scan", e.message, null)
+                }
+            } else {
+                result.notImplemented()
+            }
         }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rasam/store").setMethodCallHandler { call, result ->
             try {
